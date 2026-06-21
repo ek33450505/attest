@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-plugin.json",
+  "name": "attest",
+  "displayName": "Attest — completion-attestation gate",
+  "version": "0.1.0",
+  "description": "Verifies a subagent's Status: DONE / ## Handoff claim against the real git working-tree delta and blocks a DONE whose claimed files never landed. Deterministic, zero-LLM, fail-open.",
+  "author": { "name": "Ed Kubiak", "url": "https://github.com/ek33450505" },
+  "homepage": "https://github.com/ek33450505/attest",
+  "repository": "https://github.com/ek33450505/attest",
+  "license": "MIT",
+  "keywords": ["claude-code", "hooks", "agent-reliability", "git", "llm-agents", "verification"],
+  "defaultEnabled": false
+}

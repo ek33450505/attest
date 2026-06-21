@@ -1,0 +1,14 @@
+{
+  "name": "attest",
+  "owner": { "name": "Ed Kubiak", "url": "https://github.com/ek33450505" },
+  "description": "Attest — a local, deterministic completion-attestation gate for Claude Code subagents.",
+  "plugins": [
+    {
+      "name": "attest",
+      "source": "./",
+      "description": "Verifies a subagent's Status: DONE against the real git delta and blocks DONEs whose files never landed. Zero-LLM, fail-open, off by default.",
+      "license": "MIT",
+      "keywords": ["claude-code", "hooks", "agent-reliability"]
+    }
+  ]
+}

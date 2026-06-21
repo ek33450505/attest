@@ -1,0 +1,30 @@
+{
+  "hooks": {
+    "SubagentStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/attest-subagent-start.sh\"",
+            "async": false,
+            "timeout": 30,
+            "statusMessage": "attest: snapshotting git tree"
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/attest-subagent-stop.sh\"",
+            "async": false,
+            "timeout": 30,
+            "statusMessage": "attest: verifying completion claim"
+          }
+        ]
+      }
+    ]
+  }
+}
