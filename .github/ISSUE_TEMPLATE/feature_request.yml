@@ -1,0 +1,56 @@
+name: Feature request
+description: Suggest an enhancement to attest. Proposals must preserve the core invariants — deterministic, zero-LLM, fail-open.
+title: "[feat]: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the idea. attest deliberately stays small: a local, deterministic,
+        zero-LLM hook that grades the act, not the output. Features that hold that line
+        are very welcome.
+
+        Worth reading first: the design doc (docs/DESIGN.md) explains why the
+        invariants below are load-bearing, and docs/LIMITATIONS.md covers what is
+        intentionally out of scope.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem / motivation
+      description: What problem are you trying to solve? What gap or pain prompted this request?
+      placeholder: |
+        e.g. When a subagent claims to have modified a generated file that lives outside
+        the git tree, attest can't see the change in its delta, so ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: solution
+    attributes:
+      label: Proposed solution
+      description: How might attest address this? Sketch the behavior, the parsing/snapshot change, or the new mode you have in mind.
+      placeholder: e.g. Add an opt-in env var that extends the snapshot to a configured glob ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Other approaches you weighed, and why you didn't pick them. Optional but helpful.
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: invariants
+    attributes:
+      label: Core invariants
+      description: attest will not merge changes that break these. Please confirm your proposal upholds them.
+      options:
+        - label: This change stays deterministic — no nondeterministic inputs; the same tree + claim always yields the same verdict.
+          required: true
+        - label: This change stays zero-LLM — no model calls, no network, stdlib-only Python.
+          required: true
+        - label: This change stays fail-open — the hook can never wedge the parent session; it blocks only on proof, and any doubt or error falls open.
+          required: true

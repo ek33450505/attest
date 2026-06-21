@@ -6,8 +6,10 @@
 # delta, parses the agent's completion claim, evaluates the verdict, and prints
 # a concise human-readable report.
 #
-# Exit code: always 0 (detect-and-print mode — never blocks in Phase 1b).
-# In Phase 2 (enforce mode), exit 2 will be emitted for proven false DONEs.
+# Exit code: ALWAYS 0. In detect mode the hook only prints a report. In enforce
+# mode a proven false DONE is blocked via a stdout JSON {"decision":"block"}
+# payload — the exit code stays 0; the block travels through stdout, never via
+# exit 2 — so a broken or slow hook can never wedge the parent session (fail-open).
 #
 # ── Installation (add to ~/.claude/settings.json) ────────────────────────────
 #   "SubagentStop": [

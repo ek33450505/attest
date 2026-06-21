@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Validation dossier (evidence)
+    url: https://github.com/ek33450505/attest/blob/main/docs/VALIDATION.md
+    about: How attest's behavior was empirically verified — captured payloads, enforce-mode blocking, and the live-test harness. Read this before reporting that a behavior is "wrong."
+  - name: Design doc
+    url: https://github.com/ek33450505/attest/blob/main/docs/DESIGN.md
+    about: Why attest is deterministic, zero-LLM, and fail-open, and how the snapshot/delta/claim-parsing pipeline works. Read this before proposing a change.

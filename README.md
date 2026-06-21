@@ -1,5 +1,8 @@
 # attest
 
+[![CI](https://github.com/ek33450505/attest/actions/workflows/ci.yml/badge.svg)](https://github.com/ek33450505/attest/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
+
 > **"DONE" is a claim, not proof. Grade the act, not the output.**
 
 A local, deterministic, **zero-LLM** Claude Code hook that verifies a subagent's

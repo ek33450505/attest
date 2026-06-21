@@ -1,0 +1,97 @@
+name: Bug report
+description: Report a defect in attest — a false DONE that slipped through, a false positive, an install/hook problem, or a crash.
+title: "[bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for filing a bug. attest is local, deterministic, and zero-LLM, so most
+        problems are reproducible from the inputs below. The more of this you fill in,
+        the faster it gets fixed.
+
+        Before filing, it may help to skim the validation dossier
+        (docs/VALIDATION.md) and the design doc (docs/DESIGN.md) to confirm the
+        behavior you saw is actually unintended.
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: What did attest do? If it blocked (or failed to block) a subagent, say so explicitly.
+      placeholder: |
+        e.g. A subagent reported `Status: DONE` and `Files changed: src/foo.py`, but
+        src/foo.py never changed. With ATTEST_ENFORCE=1 I expected the stop to be blocked,
+        but it was allowed through.
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      description: What did you expect attest to do instead?
+      placeholder: e.g. The proven false DONE should have been blocked (decision=block via stdout).
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Reproduction steps
+      description: "Minimal, ordered steps to reproduce. Include the subagent's final claim text (Handoff block or Status:/Files changed: lines) if relevant."
+      placeholder: |
+        1. Install via `./install.sh`
+        2. Set `export ATTEST_ENFORCE=1`
+        3. Run a subagent that emits this final message: ...
+        4. Observe ...
+    validations:
+      required: true
+
+  - type: input
+    id: attest-version
+    attributes:
+      label: attest version
+      description: Output of `attest --version`.
+      placeholder: "attest 0.1.0"
+    validations:
+      required: true
+
+  - type: input
+    id: claude-code-version
+    attributes:
+      label: Claude Code version
+      description: Output of `claude --version`.
+      placeholder: "2.1.170"
+    validations:
+      required: true
+
+  - type: input
+    id: os
+    attributes:
+      label: Operating system
+      description: OS name and version.
+      placeholder: "macOS 15.5 / Ubuntu 24.04 / ..."
+    validations:
+      required: true
+
+  - type: dropdown
+    id: enforce-mode
+    attributes:
+      label: Was enforce mode on?
+      description: Whether ATTEST_ENFORCE was set when the bug occurred.
+      options:
+        - "No — detect mode (default, ATTEST_ENFORCE unset or 0)"
+        - "Yes — enforce mode (ATTEST_ENFORCE=1)"
+        - "Not sure"
+    validations:
+      required: true
+
+  - type: textarea
+    id: error-log
+    attributes:
+      label: Relevant lines from ~/.claude/logs/attest-errors.log
+      description: Paste any relevant lines from the attest error log. Leave blank if the file is empty or absent.
+      render: text
+    validations:
+      required: false
