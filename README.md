@@ -10,16 +10,23 @@ Every eval and observability tool grades the *output* or asks the model "are you
 
 ## Status
 
-Phases 1–2 complete (235 tests: 220 Python + 15 BATS):
+Phases 1–3 complete and **validated against real Claude Code v2.1.170** — not mocks
+(285 tests: 270 Python + 15 BATS):
 
 - **Phase 1** — deterministic core (`claim` / `gitdelta` / `verdict`) + detect-and-print
   `SubagentStart` / `SubagentStop` hooks.
-- **Phase 2** — **enforcement**: a *proven* false `DONE` can be **blocked** at `SubagentStop`
+- **Phase 2** — **enforcement**: a *proven* false `DONE` is **blocked** at `SubagentStop`
   (the subagent is forced to continue and fix it). Gated behind `ATTEST_ENFORCE=1`, **off by default**.
+- **Phase 3** — **conservative claim parser**: file claims are read only from an anchored
+  `Files changed:` line or a `## Handoff` block — never scraped from prose. A missing or
+  prose-only claim is *never* treated as a false `DONE`.
 
-> Enforcement is conservative by construction and **fails open on every doubt** (see below). It is
-> still **experimental**: real `SubagentStop` payloads need a live `ATTEST_CAPTURE=1` capture to
-> confirm the `agent_id` and block→continue assumptions before blocking is relied on in production.
+> **Live-validated (ship-gate).** Real `SubagentStart`/`SubagentStop` payloads were captured from a
+> live dispatch and confirm the load-bearing assumptions: `agent_id` is stable across a block→continue,
+> `stop_hook_active` flips `false`→`true` on the re-fire, and a block fires **no** new `SubagentStart`.
+> In an end-to-end run on real Claude Code, an **honest** agent that changed nothing was correctly
+> **not** blocked, while a genuine false `DONE` was **blocked and self-corrected**. Enforcement is
+> conservative by construction and **fails open on every doubt**.
 
 ## Usage (CLI)
 
