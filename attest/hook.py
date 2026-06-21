@@ -7,7 +7,10 @@ Public API (called from the bash shims):
   on_stop(payload_dict: dict) -> None
   main() -> int   # CLI entry: python3 -m attest.hook start|stop
 
-Mode: DETECT-AND-PRINT only (Phase 1b). Hooks always exit 0 and never block.
+Mode: detect-and-print by default. In enforce mode (ATTEST_ENFORCE=1) a proven
+false DONE is blocked by writing a {"decision":"block"} JSON object to stdout.
+Either way the hook process always exits 0 — the block travels via stdout, never
+the exit code (see on_stop / enforce.decide).
 
 ATTEST_CAPTURE=1 env var: when set, dumps the raw payload JSON and a copy of
 the transcript into fixtures/captured/ (relative to the attest repo root or cwd).
@@ -389,7 +392,8 @@ def main(argv: Optional[list] = None) -> int:
     """Entry point: python3 -m attest.hook start|stop
 
     Reads the raw JSON payload from stdin and dispatches to on_start or on_stop.
-    Always returns 0 (detect-and-print mode — never blocks).
+    Always returns 0; in enforce mode the block decision is emitted on stdout
+    (a {"decision":"block"} object), never via the exit code.
     """
     from attest.hookio import parse_payload
 
