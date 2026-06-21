@@ -2,8 +2,8 @@ class Attest < Formula
   desc "Local completion-attestation gate for Claude Code subagents"
   homepage "https://github.com/ek33450505/attest"
   url "https://github.com/ek33450505/attest/archive/refs/tags/v0.1.0.tar.gz"
-  # TODO: set after tagging v0.1.0 — `curl -sL <url> | shasum -a 256`
-  sha256 "0000000000000000000000000000000000000000000000000000000000000000"
+  # sha256 of the v0.1.0 github archive tarball (archive/refs/tags); verified byte-stable.
+  sha256 "9c47dc0cfd75311d73c91e89e9bac6375ceaf3946ac913b09fc66d9cbc13bff8"
   license "MIT"
 
   depends_on "python3" => :required
