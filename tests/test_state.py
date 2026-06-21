@@ -117,3 +117,127 @@ class TestSnapshotStoreBadPath(unittest.TestCase):
     def test_load_returns_none_on_error(self) -> None:
         result = self.state.load_snapshot('key')
         self.assertIsNone(result)
+
+
+class TestBlockCounter(unittest.TestCase):
+    """Phase-2 per-agent block counter (the loop guard)."""
+
+    def setUp(self) -> None:
+        self.tmpdir = tempfile.mkdtemp()
+        self.db_path = os.path.join(self.tmpdir, 'state.db')
+        os.environ['ATTEST_STATE_DB'] = self.db_path
+        from attest import state
+        self.state = state
+
+    def tearDown(self) -> None:
+        del os.environ['ATTEST_STATE_DB']
+
+    def test_fresh_snapshot_count_is_zero(self) -> None:
+        self.state.save_snapshot('agent-1', {'a.py': 'h'})
+        self.assertEqual(self.state.get_block_count('agent-1'), 0)
+
+    def test_increment_returns_committed_value(self) -> None:
+        self.state.save_snapshot('agent-2', {'a.py': 'h'})
+        self.assertEqual(self.state.increment_block_count('agent-2'), 1)
+        self.assertEqual(self.state.increment_block_count('agent-2'), 2)
+        self.assertEqual(self.state.get_block_count('agent-2'), 2)
+
+    def test_increment_missing_row_returns_none(self) -> None:
+        # No snapshot saved for this key -> cannot confirm a durable increment.
+        self.assertIsNone(self.state.increment_block_count('never-saved'))
+
+    def test_clear_resets_counter(self) -> None:
+        self.state.save_snapshot('agent-3', {'a.py': 'h'})
+        self.state.increment_block_count('agent-3')
+        self.state.clear('agent-3')
+        self.assertEqual(self.state.get_block_count('agent-3'), 0)
+
+    def test_resave_preserves_counter(self) -> None:
+        self.state.save_snapshot('agent-4', {'a.py': 'h'})
+        self.state.increment_block_count('agent-4')
+        self.assertEqual(self.state.get_block_count('agent-4'), 1)
+        # A re-fired start-snapshot must PRESERVE block_count (not reset it), so a
+        # re-fired SubagentStart cannot silently defeat the per-agent loop cap.
+        self.state.save_snapshot('agent-4', {'b.py': 'h2'})
+        self.assertEqual(self.state.get_block_count('agent-4'), 1)
+        # ...but the snapshot payload itself is refreshed.
+        self.assertEqual(self.state.load_snapshot('agent-4'), {'b.py': 'h2'})
+
+    def test_fresh_key_starts_at_zero(self) -> None:
+        # A brand-new key (no prior row) starts at 0 via the column default.
+        self.state.save_snapshot('agent-fresh', {'a.py': 'h'})
+        self.assertEqual(self.state.get_block_count('agent-fresh'), 0)
+
+    def test_get_count_missing_key_is_zero(self) -> None:
+        self.assertEqual(self.state.get_block_count('ghost'), 0)
+
+
+class TestSessionBlocks(unittest.TestCase):
+    """Phase-2 session-scoped backstop counter."""
+
+    def setUp(self) -> None:
+        self.tmpdir = tempfile.mkdtemp()
+        os.environ['ATTEST_STATE_DB'] = os.path.join(self.tmpdir, 'state.db')
+        from attest import state
+        self.state = state
+
+    def tearDown(self) -> None:
+        del os.environ['ATTEST_STATE_DB']
+
+    def test_session_counter_increments_and_persists(self) -> None:
+        self.assertEqual(self.state.get_session_blocks('sess-A', '/repo'), 0)
+        self.assertEqual(self.state.increment_session_blocks('sess-A', '/repo'), 1)
+        self.assertEqual(self.state.increment_session_blocks('sess-A', '/repo'), 2)
+        self.assertEqual(self.state.get_session_blocks('sess-A', '/repo'), 2)
+
+    def test_session_counter_scoped_by_session_and_repo(self) -> None:
+        self.state.increment_session_blocks('sess-A', '/repo1')
+        self.assertEqual(self.state.get_session_blocks('sess-A', '/repo2'), 0)
+        self.assertEqual(self.state.get_session_blocks('sess-B', '/repo1'), 0)
+
+    def test_session_counter_survives_agent_clear(self) -> None:
+        # clear() must NOT touch the session counter.
+        self.state.save_snapshot('agent-x', {'a.py': 'h'})
+        self.state.increment_session_blocks('sess-A', '/repo')
+        self.state.clear('agent-x')
+        self.assertEqual(self.state.get_session_blocks('sess-A', '/repo'), 1)
+
+
+class TestSchemaMigration(unittest.TestCase):
+    """An existing pre-Phase-2 DB (no block_count column) must migrate, not loop."""
+
+    def setUp(self) -> None:
+        self.tmpdir = tempfile.mkdtemp()
+        self.db_path = os.path.join(self.tmpdir, 'old.db')
+        # Build a DB with the OLD schema (no block_count, no session_blocks).
+        import sqlite3
+        conn = sqlite3.connect(self.db_path)
+        conn.execute('''
+            CREATE TABLE snapshots (
+                agent_key   TEXT PRIMARY KEY,
+                snapshot    TEXT NOT NULL,
+                repo        TEXT NOT NULL DEFAULT '',
+                session_id  TEXT NOT NULL DEFAULT '',
+                meta        TEXT NOT NULL DEFAULT '{}',
+                saved_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+            )
+        ''')
+        conn.execute(
+            "INSERT INTO snapshots (agent_key, snapshot) VALUES ('legacy', '{}')"
+        )
+        conn.commit()
+        conn.close()
+        os.environ['ATTEST_STATE_DB'] = self.db_path
+        from attest import state
+        self.state = state
+
+    def tearDown(self) -> None:
+        del os.environ['ATTEST_STATE_DB']
+
+    def test_migration_adds_block_count_and_works(self) -> None:
+        # Triggers _open_db -> idempotent ALTER. The legacy row gets default 0.
+        self.assertEqual(self.state.get_block_count('legacy'), 0)
+        self.assertEqual(self.state.increment_block_count('legacy'), 1)
+
+    def test_migration_adds_session_blocks_table(self) -> None:
+        self.assertEqual(self.state.increment_session_blocks('sess', '/r'), 1)

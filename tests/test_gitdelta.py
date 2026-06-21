@@ -21,7 +21,9 @@ import subprocess
 import tempfile
 import unittest
 
-from attest.gitdelta import snapshot, delta, NotAGitRepo, _DELETED_SENTINEL
+from attest.gitdelta import (
+    snapshot, delta, NotAGitRepo, _DELETED_SENTINEL, repo_root, path_on_disk,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -229,6 +231,101 @@ class TestDelta(unittest.TestCase):
         result = delta(before, self.repo)
         self.assertIn('a.py', result['changed'])
         self.assertIn('b.py', result['changed'])
+
+
+class TestDeltaReliability(unittest.TestCase):
+    """The explicit reliable flag — the Phase-2 landmine guard."""
+
+    def setUp(self) -> None:
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.repo = self._tmpdir.name
+        _init_repo(self.repo)
+
+    def tearDown(self) -> None:
+        self._tmpdir.cleanup()
+
+    def test_clean_repo_delta_is_reliable(self) -> None:
+        before = snapshot(self.repo)
+        result = delta(before, self.repo)
+        self.assertTrue(result['reliable'])
+
+    def test_changed_repo_delta_is_reliable(self) -> None:
+        before = snapshot(self.repo)
+        _write_file(self.repo, 'new.py', 'x = 1\n')
+        result = delta(before, self.repo)
+        self.assertTrue(result['reliable'])
+        self.assertIn('new.py', result['changed'])
+
+    def test_after_error_is_unreliable(self) -> None:
+        """A valid before-snapshot but a non-git dir at stop time → unreliable, empty."""
+        before = snapshot(self.repo)  # clean, reliable baseline
+        with tempfile.TemporaryDirectory() as non_git:
+            result = delta(before, non_git)
+        self.assertFalse(result['reliable'])
+        self.assertEqual(result['changed'], set())
+
+    def test_before_error_is_unreliable(self) -> None:
+        """A before-snapshot carrying _error (start failed) → unreliable, empty."""
+        before = {'_error': 'Not a git repository: /nope'}
+        result = delta(before, self.repo)
+        self.assertFalse(result['reliable'])
+        self.assertEqual(result['changed'], set())
+
+    def test_unreliable_never_inferred_from_emptiness(self) -> None:
+        """An empty-but-reliable delta (agent changed nothing) stays reliable=True."""
+        before = snapshot(self.repo)  # clean
+        result = delta(before, self.repo)  # nothing changed
+        self.assertEqual(result['changed'], set())
+        self.assertTrue(result['reliable'])  # empty != unreliable
+
+
+class TestRepoRootAndPathOnDisk(unittest.TestCase):
+    def setUp(self) -> None:
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.repo = self._tmpdir.name
+        _init_repo(self.repo)
+
+    def tearDown(self) -> None:
+        self._tmpdir.cleanup()
+
+    def test_repo_root_resolves_toplevel(self) -> None:
+        root = repo_root(self.repo)
+        self.assertIsNotNone(root)
+        # The resolved root points at the same repo (realpath-equal).
+        self.assertEqual(os.path.realpath(root), os.path.realpath(self.repo))
+
+    def test_repo_root_none_for_non_git(self) -> None:
+        with tempfile.TemporaryDirectory() as non_git:
+            self.assertIsNone(repo_root(non_git))
+
+    def test_path_on_disk_true_for_existing_relative(self) -> None:
+        _write_file(self.repo, 'src/real.py', 'x = 1\n')
+        root = repo_root(self.repo) or self.repo
+        self.assertTrue(path_on_disk(root, 'src/real.py'))
+
+    def test_path_on_disk_false_for_phantom(self) -> None:
+        root = repo_root(self.repo) or self.repo
+        self.assertFalse(path_on_disk(root, 'src/ghost.py'))
+
+    def test_path_on_disk_true_for_existing_absolute(self) -> None:
+        _write_file(self.repo, 'abs.py', 'x = 1\n')
+        abs_path = os.path.join(self.repo, 'abs.py')
+        self.assertTrue(path_on_disk(self.repo, abs_path))
+
+    def test_path_on_disk_empty_is_false(self) -> None:
+        self.assertFalse(path_on_disk(self.repo, ''))
+
+    def test_path_on_disk_resolves_against_payload_cwd(self) -> None:
+        """A cwd-relative claim resolves under the subagent's payload cwd subdir."""
+        sub = os.path.join(self.repo, 'sub')
+        os.makedirs(sub, exist_ok=True)
+        with open(os.path.join(sub, 'foo.py'), 'w') as fh:
+            fh.write('x = 1\n')
+        root = repo_root(self.repo) or self.repo
+        # Not found relative to the repo root...
+        self.assertFalse(path_on_disk(root, 'foo.py'))
+        # ...but found when the payload cwd (the subdir) is supplied.
+        self.assertTrue(path_on_disk(root, 'foo.py', cwd=sub))
 
 
 class TestNotAGitRepo(unittest.TestCase):

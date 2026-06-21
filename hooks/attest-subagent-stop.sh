@@ -56,8 +56,15 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" 2>/dev/null && pwd || dirname "$0")"
 ATTEST_REPO="$(dirname "$SCRIPT_DIR")"
 
 # ── Dispatch to the Python hook handler ──────────────────────────────────────
+# stdout flows through unchanged — in enforce mode it carries ONLY the
+# {"decision":"block",...} JSON that Claude Code reads. Python diagnostics go to
+# stderr; route them to the error log (not /dev/null) so enforce-mode decisions
+# are observable, and so the hook's stdout stays pure JSON.
+ATTEST_LOG="${HOME}/.claude/logs/attest-errors.log"
 echo "$INPUT" | PYTHONPATH="$ATTEST_REPO:${PYTHONPATH:-}" \
-  "$PYTHON" -m attest.hook stop 2>/dev/null || \
+  "$PYTHON" -m attest.hook stop 2>>"$ATTEST_LOG" || \
   _log_error "attest.hook stop failed (exit $?)"
 
+# Always exit 0: the block signal travels via stdout JSON, never the exit code,
+# so a broken/slow hook can never wedge the parent session (fail-open by design).
 exit 0

@@ -51,11 +51,42 @@ def _open_db() -> sqlite3.Connection:
             repo        TEXT NOT NULL DEFAULT '',
             session_id  TEXT NOT NULL DEFAULT '',
             meta        TEXT NOT NULL DEFAULT '{}',
+            block_count INTEGER NOT NULL DEFAULT 0,
             saved_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+        )
+    ''')
+    # Idempotent migration for pre-Phase-2 DBs created without block_count.
+    # Without this, a SELECT/UPDATE of block_count on an old DB raises
+    # OperationalError, which (swallowed) would read back as 0 forever — the
+    # classic "counter never increments -> infinite block" failure. See python.md.
+    try:
+        conn.execute('ALTER TABLE snapshots ADD COLUMN block_count INTEGER NOT NULL DEFAULT 0')
+    except sqlite3.OperationalError:
+        pass  # column already exists
+    # Session-scoped backstop counter (independent of agent_key stability). Keyed on
+    # the confirmed-real (session_id, repo); bounds any runaway even if agent_id churns.
+    conn.execute('''
+        CREATE TABLE IF NOT EXISTS session_blocks (
+            session_id  TEXT NOT NULL,
+            repo        TEXT NOT NULL,
+            n           INTEGER NOT NULL DEFAULT 0,
+            updated_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+            PRIMARY KEY (session_id, repo)
         )
     ''')
     conn.commit()
     return conn
+
+
+def _safe_close(conn) -> None:
+    """Close a sqlite connection if open, ignoring errors. For finally blocks so a
+    connection is never leaked on an exception path (a hook runs as a short-lived
+    process, but long-lived test/caller processes must not accumulate handles)."""
+    if conn is not None:
+        try:
+            conn.close()
+        except Exception:  # noqa: BLE001
+            pass
 
 
 # ---------------------------------------------------------------------------
@@ -96,27 +127,38 @@ def save_snapshot(
     Returns:
         True on success, False on error.
     """
+    conn = None
     try:
         conn = _open_db()
+        snap_json = json.dumps(snapshot)
+        meta_json = json.dumps(meta or {})
+        # INSERT-OR-IGNORE then UPDATE (not INSERT OR REPLACE) so an existing row's
+        # block_count is PRESERVED, never reset. REPLACE would delete+reinsert and
+        # silently zero the per-agent loop counter — a re-fired SubagentStart mid-retry
+        # could then defeat the cap. New rows get block_count=0 via the column default.
         conn.execute(
             '''
-            INSERT OR REPLACE INTO snapshots
+            INSERT OR IGNORE INTO snapshots
                 (agent_key, snapshot, repo, session_id, meta)
             VALUES (?, ?, ?, ?, ?)
             ''',
-            (
-                key,
-                json.dumps(snapshot),
-                repo or '',
-                session_id or '',
-                json.dumps(meta or {}),
-            ),
+            (key, snap_json, repo or '', session_id or '', meta_json),
+        )
+        conn.execute(
+            '''
+            UPDATE snapshots
+               SET snapshot = ?, repo = ?, session_id = ?, meta = ?,
+                   saved_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+             WHERE agent_key = ?
+            ''',
+            (snap_json, repo or '', session_id or '', meta_json, key),
         )
         conn.commit()
-        conn.close()
         return True
     except Exception:  # noqa: BLE001
         return False
+    finally:
+        _safe_close(conn)
 
 
 def load_snapshot(key: str) -> Optional[dict]:
@@ -124,6 +166,7 @@ def load_snapshot(key: str) -> Optional[dict]:
 
     Returns the snapshot dict, or None if not found.
     """
+    conn = None
     try:
         conn = _open_db()
         cur = conn.execute(
@@ -131,26 +174,142 @@ def load_snapshot(key: str) -> Optional[dict]:
             (key,),
         )
         row = cur.fetchone()
-        conn.close()
         if row is None:
             return None
         return json.loads(row[0])
     except Exception:  # noqa: BLE001
         return None
+    finally:
+        _safe_close(conn)
 
 
 def clear(key: str) -> None:
     """Delete the stored snapshot for the given key (idempotent).
 
+    Drops the per-agent row, which discards both the snapshot and its
+    ``block_count`` atomically. The session-scoped counter is intentionally NOT
+    cleared here (it spans agents for the life of the session).
+
     Silently ignores errors.
     """
+    conn = None
     try:
         conn = _open_db()
         conn.execute('DELETE FROM snapshots WHERE agent_key = ?', (key,))
         conn.commit()
-        conn.close()
     except Exception:  # noqa: BLE001
         pass
+    finally:
+        _safe_close(conn)
+
+
+# ---------------------------------------------------------------------------
+# Enforcement counters (Phase 2)
+# ---------------------------------------------------------------------------
+
+def get_block_count(key: str) -> int:
+    """Return the per-agent block counter for ``key`` (0 if absent or on error)."""
+    conn = None
+    try:
+        conn = _open_db()
+        cur = conn.execute(
+            'SELECT block_count FROM snapshots WHERE agent_key = ?', (key,)
+        )
+        row = cur.fetchone()
+        if row is None or row[0] is None:
+            return 0
+        return int(row[0])
+    except Exception:  # noqa: BLE001
+        return 0
+    finally:
+        _safe_close(conn)
+
+
+def increment_block_count(key: str) -> Optional[int]:
+    """Atomically increment the per-agent block counter and return the new value.
+
+    Returns the durably-committed new count, or ``None`` if the row does not
+    exist or the write fails. The caller MUST treat ``None`` as "do not block"
+    (fail open): emitting a block without a persisted increment is what creates
+    an unbounded loop, so an unconfirmable write must suppress the block.
+    """
+    conn = None
+    try:
+        conn = _open_db()
+        cur = conn.execute(
+            'UPDATE snapshots SET block_count = block_count + 1 WHERE agent_key = ?',
+            (key,),
+        )
+        if cur.rowcount < 1:
+            return None  # no such row — cannot confirm the increment
+        conn.commit()
+        cur2 = conn.execute(
+            'SELECT block_count FROM snapshots WHERE agent_key = ?', (key,)
+        )
+        row = cur2.fetchone()
+        if row is None or row[0] is None:
+            return None
+        return int(row[0])
+    except Exception:  # noqa: BLE001
+        return None
+    finally:
+        _safe_close(conn)
+
+
+def get_session_blocks(session_id: str, repo: str) -> int:
+    """Return the session-scoped block counter for (session_id, repo); 0 if absent."""
+    conn = None
+    try:
+        conn = _open_db()
+        cur = conn.execute(
+            'SELECT n FROM session_blocks WHERE session_id = ? AND repo = ?',
+            (session_id or '', repo or ''),
+        )
+        row = cur.fetchone()
+        if row is None or row[0] is None:
+            return 0
+        return int(row[0])
+    except Exception:  # noqa: BLE001
+        return 0
+    finally:
+        _safe_close(conn)
+
+
+def increment_session_blocks(session_id: str, repo: str) -> Optional[int]:
+    """Atomically increment the session backstop counter; return the new value.
+
+    Returns the durably-committed new count, or ``None`` on failure (caller fails
+    open). Uses INSERT-OR-IGNORE then UPDATE for compatibility with older sqlite
+    (no UPSERT dependency).
+    """
+    sid = session_id or ''
+    rp = repo or ''
+    conn = None
+    try:
+        conn = _open_db()
+        conn.execute(
+            'INSERT OR IGNORE INTO session_blocks (session_id, repo, n) VALUES (?, ?, 0)',
+            (sid, rp),
+        )
+        conn.execute(
+            'UPDATE session_blocks SET n = n + 1, '
+            "updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') "
+            'WHERE session_id = ? AND repo = ?',
+            (sid, rp),
+        )
+        conn.commit()
+        cur = conn.execute(
+            'SELECT n FROM session_blocks WHERE session_id = ? AND repo = ?',
+            (sid, rp),
+        )
+        row = cur.fetchone()
+        if row is None or row[0] is None:
+            return None
+        return int(row[0])
+    except Exception:  # noqa: BLE001
+        return None
+    finally:
+        _safe_close(conn)
 
 
 # ---------------------------------------------------------------------------
@@ -166,6 +325,7 @@ def mirror_to_cast_db(record: dict) -> None:
     Args:
         record: arbitrary dict to store as JSON in the ``payload`` column.
     """
+    conn = None
     try:
         cast_db_path = os.path.expanduser(
             os.environ.get('CAST_DB_PATH', '~/.claude/cast.db')
@@ -192,6 +352,7 @@ def mirror_to_cast_db(record: dict) -> None:
             ),
         )
         conn.commit()
-        conn.close()
     except Exception:  # noqa: BLE001
         pass
+    finally:
+        _safe_close(conn)

@@ -186,6 +186,101 @@ make_stop_payload() {
   [[ "$output" != *"MISMATCH"* ]]
 }
 
+# ── Enforce mode (ATTEST_ENFORCE=1) ─────────────────────────────────────────────
+
+@test "enforce mode blocks a false DONE with pure-JSON decision and exits 0" {
+  export ATTEST_ENFORCE=1
+  local agent_id="bats-enforce-block"
+  local session_id="sess-enforce-block"
+
+  local start_payload
+  start_payload="$(make_start_payload "$agent_id" "$session_id" "$TEST_REPO")"
+  run bash "$START_HOOK" <<< "$start_payload"
+  [ "$status" -eq 0 ]
+
+  # Agent claims src/ghost.py (never written) with status DONE.
+  local stop_payload
+  stop_payload="$(printf '{"agent_type":"code-writer","agent_id":"%s","session_id":"%s","cwd":"%s","stop_reason":"end_turn","transcript_path":"","stop_hook_active":false,"last_assistant_message":"%s"}' \
+    "$agent_id" "$session_id" "$TEST_REPO" \
+    "$(printf '## Handoff\nfiles_changed: src/ghost.py\nstatus: DONE\nblockers: none\n' | python3 -c 'import sys,json; print(json.dumps(sys.stdin.read())[1:-1])')" \
+  )"
+
+  run bash "$STOP_HOOK" <<< "$stop_payload"
+  [ "$status" -eq 0 ]
+  # stdout must parse as JSON with decision=block (proves pure-stdout contract).
+  printf '%s' "$output" | python3 -c 'import sys,json; d=json.loads(sys.stdin.read()); assert d["decision"]=="block", d'
+  [[ "$output" == *'"decision"'* ]]
+  [[ "$output" == *"src/ghost.py"* ]]
+  # No human "attest:" diagnostics leaked onto stdout.
+  [[ "$output" != *"attest:"* ]]
+}
+
+@test "enforce mode does NOT block a truthful claim (empty stdout)" {
+  export ATTEST_ENFORCE=1
+  local agent_id="bats-enforce-truth"
+  local session_id="sess-enforce-truth"
+
+  run bash "$START_HOOK" <<< "$(make_start_payload "$agent_id" "$session_id" "$TEST_REPO")"
+  [ "$status" -eq 0 ]
+
+  mkdir -p "$TEST_REPO/src"
+  echo "def feature(): pass" > "$TEST_REPO/src/feature.py"
+
+  local stop_payload
+  stop_payload="$(printf '{"agent_type":"code-writer","agent_id":"%s","session_id":"%s","cwd":"%s","stop_reason":"end_turn","transcript_path":"","stop_hook_active":false,"last_assistant_message":"%s"}' \
+    "$agent_id" "$session_id" "$TEST_REPO" \
+    "$(printf '## Handoff\nfiles_changed: src/feature.py\nstatus: DONE\nblockers: none\n' | python3 -c 'import sys,json; print(json.dumps(sys.stdin.read())[1:-1])')" \
+  )"
+
+  run bash "$STOP_HOOK" <<< "$stop_payload"
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+}
+
+@test "enforce mode fails open on a non-git directory (no block)" {
+  export ATTEST_ENFORCE=1
+  local non_git="$TEST_WORK_DIR/enforce-not-a-repo"
+  mkdir -p "$non_git"
+  local agent_id="bats-enforce-nongit"
+  local session_id="sess-enforce-nongit"
+
+  run bash "$START_HOOK" <<< "$(make_start_payload "$agent_id" "$session_id" "$non_git")"
+  [ "$status" -eq 0 ]
+
+  local stop_payload
+  stop_payload="$(printf '{"agent_type":"code-writer","agent_id":"%s","session_id":"%s","cwd":"%s","stop_reason":"end_turn","transcript_path":"","stop_hook_active":false,"last_assistant_message":"%s"}' \
+    "$agent_id" "$session_id" "$non_git" \
+    "$(printf '## Handoff\nfiles_changed: ghost.py\nstatus: DONE\nblockers: none\n' | python3 -c 'import sys,json; print(json.dumps(sys.stdin.read())[1:-1])')" \
+  )"
+
+  run bash "$STOP_HOOK" <<< "$stop_payload"
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+}
+
+@test "enforce mode retry cap: second consecutive false DONE does not block" {
+  export ATTEST_ENFORCE=1
+  local agent_id="bats-enforce-retry"
+  local session_id="sess-enforce-retry"
+
+  run bash "$START_HOOK" <<< "$(make_start_payload "$agent_id" "$session_id" "$TEST_REPO")"
+  [ "$status" -eq 0 ]
+
+  local stop_payload
+  stop_payload="$(printf '{"agent_type":"code-writer","agent_id":"%s","session_id":"%s","cwd":"%s","stop_reason":"end_turn","transcript_path":"","stop_hook_active":false,"last_assistant_message":"%s"}' \
+    "$agent_id" "$session_id" "$TEST_REPO" \
+    "$(printf '## Handoff\nfiles_changed: src/ghost.py\nstatus: DONE\nblockers: none\n' | python3 -c 'import sys,json; print(json.dumps(sys.stdin.read())[1:-1])')" \
+  )"
+
+  run bash "$STOP_HOOK" <<< "$stop_payload"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'"decision"'* ]]   # first stop blocks
+
+  run bash "$STOP_HOOK" <<< "$stop_payload"
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]                      # second stop fails open (retry cap)
+}
+
 @test "hooks use transcript_path when payload_text absent" {
   local agent_id="bats-transcript"
   local session_id="sess-transcript"

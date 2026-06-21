@@ -56,6 +56,50 @@ def _get_repo_root(repo_dir: str) -> str:
     return stdout.decode('utf-8', errors='replace').strip()
 
 
+def repo_root(repo_dir: str) -> Optional[str]:
+    """Resolve the absolute git toplevel for repo_dir, or None if not a git repo.
+
+    Non-raising wrapper around ``_get_repo_root``. Used so callers can normalize
+    claimed/observed paths against the *resolved* toplevel (e.g. ``/private/tmp``
+    rather than the symlinked ``/tmp``) instead of an unresolved cwd.
+    """
+    try:
+        return _get_repo_root(repo_dir)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def path_on_disk(root: str, path: str, cwd: str = '') -> bool:
+    """Return True if a claimed path currently exists on disk.
+
+    Resolves a relative ``path`` against ``root`` (the git toplevel) AND against
+    ``cwd`` (the subagent's payload cwd, which may be a subdirectory of the repo —
+    so an agent that reported a cwd-relative claim still resolves), and also
+    accepts an absolute path. The bias is intentionally toward returning True: a
+    claimed file that exists on disk is NOT phantom and must never trigger an
+    enforcement block, so a spurious True only ever fails open (skips blocking),
+    never the reverse.
+    """
+    if not path:
+        return False
+    candidates = []
+    if os.path.isabs(path):
+        candidates.append(path)
+    else:
+        if root:
+            candidates.append(os.path.join(root, path))
+        if cwd:
+            candidates.append(os.path.join(cwd, path))
+        candidates.append(path)  # process-cwd fallback (last resort)
+    for cand in candidates:
+        try:
+            if os.path.exists(cand):
+                return True
+        except OSError:
+            continue
+    return False
+
+
 def _sha256_file(path: str) -> str:
     """Return the SHA-256 hex digest of the file at path.
 
@@ -176,25 +220,39 @@ def delta(before: dict, repo_dir: str) -> dict:
         {
             "changed":   set[str],  # repo-relative paths whose hash differs from before
             "ambiguous": bool,      # True when before had pre-existing uncommitted changes
+            "reliable":  bool,      # True only when BOTH snapshots computed without error
         }
 
     Ambiguity: if ``before`` is non-empty and has no ``_error`` key, it means the repo
     had uncommitted changes at snapshot time. Changes from other agents or the user
     cannot be cleanly separated, so ``ambiguous=True`` is set honestly rather than
     asserting false precision (v1 sequential-case behaviour per spec).
+
+    Reliability: ``reliable`` is the explicit, load-bearing signal for enforcement. An
+    empty ``changed`` set is ambiguous on its own — it means EITHER "the agent changed
+    nothing" OR "git could not be read" (non-git dir, transient ``git status`` failure).
+    These must never be confused: the former can be a false DONE, the latter must fail
+    open. ``reliable`` is derived ONLY from whether each snapshot carried an ``_error``,
+    NEVER inferred from ``len(changed)``.
     """
+    # If the start snapshot itself failed (non-git dir / git error at SubagentStart),
+    # there is no trustworthy baseline — short-circuit as unreliable. Falling through
+    # would treat every current diff-from-HEAD path as "changed" against a null baseline.
+    if '_error' in before:
+        return {'changed': set(), 'ambiguous': False, 'reliable': False}
+
     # Ambiguity: before had pre-existing uncommitted changes.
     before_has_changes = bool(
         before
-        and '_error' not in before
         and len(before) > 0
     )
 
     after = snapshot(repo_dir)
 
     if '_error' in after:
-        # Cannot determine what changed; return empty set with ambiguity noted.
-        return {'changed': set(), 'ambiguous': before_has_changes}
+        # Cannot determine what changed; empty set, and explicitly UNRELIABLE so
+        # enforcement fails open instead of mistaking this for "changed nothing".
+        return {'changed': set(), 'ambiguous': before_has_changes, 'reliable': False}
 
     changed: set = set()
 
@@ -209,4 +267,4 @@ def delta(before: dict, repo_dir: str) -> dict:
         if path != '_error' and path not in after:
             changed.add(path)
 
-    return {'changed': changed, 'ambiguous': before_has_changes}
+    return {'changed': changed, 'ambiguous': before_has_changes, 'reliable': True}
