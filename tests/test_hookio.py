@@ -180,6 +180,38 @@ class TestParsePayload(unittest.TestCase):
         result = self.parse_payload('{}')
         expected_keys = {
             'agent_id', 'agent_type', 'session_id', 'stop_reason',
-            'transcript_path', 'cwd', 'stop_hook_active', 'payload_text',
+            'transcript_path', 'agent_transcript_path', 'cwd', 'stop_hook_active', 'payload_text',
         }
         self.assertEqual(set(result.keys()), expected_keys)
+
+    def test_agent_transcript_path_present(self) -> None:
+        """agent_transcript_path is exposed in the normalized dict when the field is in the payload."""
+        raw = json.dumps({
+            'agent_type': 'test',
+            'transcript_path': '/parent/session.jsonl',
+            'agent_transcript_path': '/subagents/agent-abc.jsonl',
+        })
+        result = self.parse_payload(raw)
+        self.assertEqual(result['agent_transcript_path'], '/subagents/agent-abc.jsonl')
+        # Back-compat key still returns the parent path (transcript_path wins)
+        self.assertEqual(result['transcript_path'], '/parent/session.jsonl')
+
+    def test_agent_transcript_path_absent_defaults_empty(self) -> None:
+        """agent_transcript_path defaults to '' when not in the payload."""
+        raw = json.dumps({'agent_type': 'test', 'transcript_path': '/parent/session.jsonl'})
+        result = self.parse_payload(raw)
+        self.assertEqual(result['agent_transcript_path'], '')
+        self.assertEqual(result['transcript_path'], '/parent/session.jsonl')
+
+    def test_agent_transcript_path_only_no_transcript_path(self) -> None:
+        """When only agent_transcript_path is present, both keys are populated correctly."""
+        raw = json.dumps({'agent_type': 'test', 'agent_transcript_path': '/subagents/agent-xyz.jsonl'})
+        result = self.parse_payload(raw)
+        self.assertEqual(result['agent_transcript_path'], '/subagents/agent-xyz.jsonl')
+        # Back-compat: transcript_path falls through to agent_transcript_path
+        self.assertEqual(result['transcript_path'], '/subagents/agent-xyz.jsonl')
+
+    def test_agent_transcript_path_empty_in_defaults(self) -> None:
+        """Empty payload returns agent_transcript_path as empty string."""
+        result = self.parse_payload('{}')
+        self.assertEqual(result['agent_transcript_path'], '')

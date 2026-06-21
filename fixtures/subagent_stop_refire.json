@@ -1,0 +1,19 @@
+{
+  "_captured": true,
+  "_note": "Real SubagentStop payload \u2014 the post-block re-fire of the SAME agent_id. stop_hook_active=TRUE; claim corrected to status BLOCKED/files none. Loop-safety fixture proving block->continue keeps agent_id and re-fires stop with stop_hook_active set.",
+  "session_id": "6399a9c0-ee73-4162-a2f7-3c055866d0c7",
+  "transcript_path": "/Users/dev/.claude/projects/-tmp-attest-test-repo/6399a9c0-ee73-4162-a2f7-3c055866d0c7.jsonl",
+  "cwd": "/tmp/attest-test-repo",
+  "permission_mode": "bypassPermissions",
+  "agent_id": "aaff99053b7f9c680",
+  "agent_type": "general-purpose",
+  "effort": {
+    "level": "high"
+  },
+  "hook_event_name": "SubagentStop",
+  "stop_hook_active": true,
+  "agent_transcript_path": "/Users/dev/.claude/projects/-tmp-attest-test-repo/6399a9c0-ee73-4162-a2f7-3c055866d0c7/subagents/agent-aaff99053b7f9c680.jsonl",
+  "last_assistant_message": "The hook is parsing file names out of my prose. My actual situation: no work was done, no files changed, and the task itself was never substantively specified beyond a rigid output template. Let me correct the handoff to truthfully reflect that nothing was changed.\n\n## Handoff\nfiles_changed: none\nstatus: BLOCKED\nblockers: No task was specified beyond an output template; ghost.py does not exist; Bash blocked by EPERM session-env error",
+  "background_tasks": [],
+  "session_crons": []
+}

@@ -7,19 +7,22 @@ Public API:
 
 Returns a normalized dict:
   {
-    "agent_id":         str,   # from agent_id or subagent_id; "" when absent
-    "agent_type":       str,   # from agent_type (primary) or legacy name fields
-    "session_id":       str,
-    "stop_reason":      str,
-    "transcript_path":  str,   # from transcript_path or agent_transcript_path; "" when absent
-    "cwd":              str,
-    "stop_hook_active": bool,
-    "payload_text":     str,   # best effort text from the payload body
+    "agent_id":              str,   # from agent_id or subagent_id; "" when absent
+    "agent_type":            str,   # from agent_type (primary) or legacy name fields
+    "session_id":            str,
+    "stop_reason":           str,
+    "transcript_path":       str,   # from transcript_path or agent_transcript_path (back-compat); "" when absent
+    "agent_transcript_path": str,   # from agent_transcript_path; "" when absent
+    "cwd":                   str,
+    "stop_hook_active":      bool,
+    "payload_text":          str,   # best effort text from the payload body
   }
 
 Field precedence (mirrors cast-subagent-stop-hook.sh lines ~104-145):
   agent_id   : payload["agent_id"] > payload["subagent_id"]
   agent_type : payload["agent_type"] > payload["agent_name"] > payload["subagent_name"] > "unknown"
+  transcript_path : payload["transcript_path"] > payload["agent_transcript_path"] (back-compat fallback)
+  agent_transcript_path : payload["agent_transcript_path"] (the subagent's own jsonl; prefer for claim extraction)
   payload_text : agent_response.content[].type=="text" joined >
                  last_assistant_message > output > body > ""
 
@@ -68,6 +71,7 @@ def parse_payload(raw: str) -> dict:
         'session_id': '',
         'stop_reason': '',
         'transcript_path': '',
+        'agent_transcript_path': '',
         'cwd': '',
         'stop_hook_active': False,
         'payload_text': '',
@@ -103,12 +107,18 @@ def parse_payload(raw: str) -> dict:
     session_id: str = data.get('session_id') or ''
     stop_reason: str = data.get('stop_reason') or ''
 
-    # transcript_path: try both field names used across Claude Code versions
+    # transcript_path: back-compat key — prefers the parent session transcript_path, but
+    # falls back to agent_transcript_path so older call-sites that only check transcript_path
+    # continue to get a non-empty value even on the real payload format (BUG-2 back-compat).
     transcript_path: str = (
         data.get('transcript_path') or
         data.get('agent_transcript_path') or
         ''
     )
+
+    # agent_transcript_path: the subagent's own jsonl. For SubagentStop claim extraction
+    # this is the CORRECT transcript to read (not the parent session transcript_path).
+    agent_transcript_path: str = data.get('agent_transcript_path') or ''
 
     cwd: str = data.get('cwd') or ''
 
@@ -133,6 +143,7 @@ def parse_payload(raw: str) -> dict:
         'session_id': str(session_id),
         'stop_reason': str(stop_reason),
         'transcript_path': str(transcript_path),
+        'agent_transcript_path': str(agent_transcript_path),
         'cwd': str(cwd),
         'stop_hook_active': stop_hook_active,
         'payload_text': str(payload_text),

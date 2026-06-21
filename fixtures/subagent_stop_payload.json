@@ -1,23 +1,19 @@
 {
-  "_synthetic": true,
-  "_note": "Synthetic payload matching the confirmed Claude Code SubagentStop schema (Phase 0 verified 2026-06-20). Real payload capture pending — set ATTEST_CAPTURE=1 after hooks are installed.",
-  "agent_type": "code-writer",
-  "agent_id": "a1b2c3d4e5f60001",
-  "session_id": "sess-0000-0000-0000-000000000001",
-  "stop_reason": "end_turn",
-  "transcript_path": "",
+  "_captured": true,
+  "_note": "Real SubagentStop payload \u2014 true DONE (hello.py actually created), clean ## Handoff claim. Captured 2026-06-21. Replaces the prior synthetic fixture. Paths/username sanitized.",
+  "session_id": "634edb84-87dc-4255-b130-8251154cbfd7",
+  "transcript_path": "/Users/dev/.claude/projects/-tmp-attest-test-repo/634edb84-87dc-4255-b130-8251154cbfd7.jsonl",
   "cwd": "/tmp/attest-test-repo",
-  "stop_hook_active": false,
-  "agent_response": {
-    "content": [
-      {
-        "type": "text",
-        "text": "## Handoff\nfiles_changed: src/feature.py, tests/test_feature.py\nstatus: DONE\nblockers: none\nkey_decisions: Used stdlib only per project conventions.\n\n## Work Log\n- Read: existing patterns in src/\n- Edits: src/feature.py (add feature), tests/test_feature.py (add tests)\n- code-reviewer result: DONE\n- Tests: 12 pass, 0 fail (unittest)\n\nStatus: DONE\nSummary: Implemented feature X — 2 files changed, code-reviewer approved\nFiles changed: src/feature.py, tests/test_feature.py"
-      }
-    ]
+  "permission_mode": "bypassPermissions",
+  "agent_id": "aa333a780eca6d224",
+  "agent_type": "general-purpose",
+  "effort": {
+    "level": "high"
   },
-  "last_assistant_message": "",
-  "output": "",
-  "duration_ms": 42000,
-  "tool_use_count": 8
+  "hook_event_name": "SubagentStop",
+  "stop_hook_active": false,
+  "agent_transcript_path": "/Users/dev/.claude/projects/-tmp-attest-test-repo/634edb84-87dc-4255-b130-8251154cbfd7/subagents/agent-aa333a780eca6d224.jsonl",
+  "last_assistant_message": "Created hello.py with the requested content.\n\n## Handoff\nfiles_changed: hello.py\nstatus: DONE\nblockers: none",
+  "background_tasks": [],
+  "session_crons": []
 }

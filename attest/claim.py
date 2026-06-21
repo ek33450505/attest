@@ -7,6 +7,19 @@ Tier 1: Parse ## Handoff block (structured, preferred).
         handoff blocks parse identically here and in the upstream parser.
 
 Tier 2: Natural-language fallback (regex-based, when no Handoff block found).
+        Status: extracted ONLY when "Status:" appears at start-of-line (after
+        optional leading whitespace). Files changed: extracted ONLY from an
+        explicit key at start-of-line. Separator anchoring (/ ; |) was removed
+        in BUG-4b hardening — it produced false-positives on ordinary prose
+        such as "The previous implementation; status: DONE was broken."
+
+        Accepted trade-off: a single-line "Status: DONE / Files changed: a.txt"
+        will detect status but NOT extract the file. Use multi-line format or a
+        ## Handoff block to have files included in the verified claim.
+
+        Free-prose scraping (backtick paths, verb-path patterns, bare DONE) is
+        intentionally absent — it was a false-positive source in live capture
+        (BUG-4).
 
 CRITICAL RULE: a MISSING or unparseable claim returns status=None, source="none".
                It MUST NEVER be treated as a false DONE downstream.
@@ -16,7 +29,7 @@ Return value of parse_claim():
     "status":        str | None,       # DONE | DONE_WITH_CONCERNS | BLOCKED | NEEDS_CONTEXT | None
     "files_changed": list[str],        # normalized file paths (empty list when none)
     "blockers":      str | None,       # blockers text, or None when absent/none
-    "ran_tests":     bool,             # True if claim text mentions running tests
+    "ran_tests":     bool,             # True if claim text mentions running tests (informational only)
     "source":        str,              # "handoff" | "nl" | "none"
     "raw":           str,              # first 500 chars of the parsed source block
   }
@@ -35,28 +48,42 @@ _HANDOFF_RE = re.compile(r'## Handoff\s*\n([\s\S]+?)(?=\n## |\Z)')
 _STATUS_VALUES = frozenset({'DONE', 'DONE_WITH_CONCERNS', 'BLOCKED', 'NEEDS_CONTEXT'})
 
 # ---------------------------------------------------------------------------
-# Tier 2 — natural-language patterns
+# Tier 2 — anchored natural-language patterns
+#
+# REMOVED (BUG-4 hardening — false-positive sources):
+#   _BACKTICK_PATH_RE  — backtick-wrapped tokens contributed ghost file paths
+#   _VERB_PATH_RE      — "created foo.py" patterns fired on prose descriptions
+#   _BARE_DONE_RE      — bare "DONE" anywhere caused false blocks on honest prose
+#
+# REMOVED (BUG-4b hardening — separator anchoring produced false-positives):
+#   _NL_STATUS_SEP_RE  — "Status:" after / ; | fired on ordinary prose
+#                        e.g. "The previous implementation; status: DONE was broken."
+#   _FILES_KEY_SEP_RE  — files-key after / ; | produced phantom file claims
+#                        e.g. "Status: DONE / files_changed: ghost.py" -> ['ghost.py']
+#
+# Replacement (start-of-line ONLY): Status: and files-changed keys are now
+# recognised ONLY at start-of-line (after optional whitespace). A path mentioned
+# in prose MUST NOT become a claimed file. Accepted trade-off: a single-line
+# "Status: DONE / Files changed: a.txt" will detect status but NOT extract the
+# file; use multi-line format or a ## Handoff block to have files verified.
 # ---------------------------------------------------------------------------
 
-# "Status: DONE" and variants (case-insensitive).
-_NL_STATUS_RE = re.compile(
-    r'\bStatus\s*:\s*(DONE_WITH_CONCERNS|DONE|BLOCKED|NEEDS_CONTEXT)\b',
+# "Status: DONE" anchored at start of a line (use with re.match() on each line).
+_NL_STATUS_SOL_RE = re.compile(
+    r'[ \t]*Status\s*:\s*(DONE_WITH_CONCERNS|DONE|BLOCKED|NEEDS_CONTEXT)\b',
     re.IGNORECASE,
 )
 
-# Bare "DONE" token not preceded by "Status:" (lower-priority fallback).
-_BARE_DONE_RE = re.compile(r'(?<!Status:\s)(?<!Status: )\bDONE\b')
-
-# Backtick-wrapped tokens: `some/path.py`
-_BACKTICK_PATH_RE = re.compile(r'`([^`\n]+)`')
-
-# Verb-then-path: "created foo/bar.py", "modified tests/test_foo.py", etc.
-_VERB_PATH_RE = re.compile(
-    r'\b(?:created|added|edited|changed|wrote|modified|updated)\s+([^\s,;:\n]+)',
+# Files key at start of a line (use with re.match() on each line).
+# Keys: files_changed, files changed, changed files, modified files, files modified.
+# Value terminator: \n | ; only — NOT / because file paths contain directory slashes.
+_FILES_KEY_SOL_RE = re.compile(
+    r'[ \t]*(?:files[_ ]changed|changed[_ ]files|modified[_ ]files|files[_ ]modified)'
+    r'\s*:\s*([^\n|;]*)',
     re.IGNORECASE,
 )
 
-# Test-run heuristics.
+# Test-run heuristics (informational only; does not gate blocking).
 _RAN_TESTS_RE = re.compile(
     r'\b(?:ran|run|executed|running)\s+(?:the\s+)?tests?\b'
     r'|\btests?\s+(?:pass(?:ed)?|green|ok)\b'
@@ -72,22 +99,6 @@ _RAN_TESTS_RE = re.compile(
 # ---------------------------------------------------------------------------
 # Shared helpers
 # ---------------------------------------------------------------------------
-
-def _looks_like_path(token: str) -> bool:
-    """Return True if token plausibly looks like a file path.
-
-    Heuristics: contains '/' (directory separator) OR has a file extension
-    (trailing '.XYZ' where XYZ is 1-6 alpha chars).
-    """
-    if '/' in token:
-        return True
-    dot = token.rfind('.')
-    if 0 < dot < len(token) - 1:
-        ext = token[dot + 1:]
-        if ext.isalpha() and 1 <= len(ext) <= 6:
-            return True
-    return False
-
 
 def _parse_kv(block: str) -> dict:
     """Parse 'key: value' lines from a Handoff block body.
@@ -115,14 +126,15 @@ def _parse_kv(block: str) -> dict:
 
 
 def _parse_files_changed(raw: str) -> list:
-    """Parse files_changed value: comma-separated list; literal 'none' → []."""
+    """Parse files_changed value: comma/and-separated list; literal 'none' → []."""
     if not raw:
         return []
     stripped = raw.strip()
     if stripped.lower() == 'none':
         return []
-    parts = [p.strip() for p in stripped.split(',')]
-    return [p for p in parts if p]
+    # Split on commas and the word 'and' (optional Oxford-style separator)
+    parts = re.split(r',|\band\b', stripped, flags=re.IGNORECASE)
+    return [p.strip() for p in parts if p.strip()]
 
 
 # ---------------------------------------------------------------------------
@@ -175,36 +187,39 @@ def _parse_handoff(text: str) -> Optional[dict]:
 def _parse_nl(text: str) -> dict:
     """Tier 2 natural-language fallback parser.
 
-    Detects Status: <value> and extracts file paths from backtick tokens and
-    verb-then-path patterns. Deduplicates paths (preserves first-seen order).
+    Detects Status: <value> ONLY when anchored at start-of-line (after optional
+    leading whitespace). Extracts files_changed ONLY from an explicit files-key
+    at start-of-line. Separator anchoring (/ ; |) was removed in BUG-4b hardening
+    because it fired on ordinary prose (e.g. "impl; Status: DONE was broken.").
+
+    Intentionally absent (BUG-4 / BUG-4b hardening):
+      - Backtick-token path scraping
+      - Verb-then-path scraping ("created foo.py")
+      - Bare "DONE" anywhere fallback
+      - Status: or files-key after a field separator (/ ; |)
+
+    A path mentioned in prose (e.g. \"the bug is in `src/auth.py`\") MUST NOT
+    become a claimed file.
     """
-    # Status detection — prefer explicit "Status: X" form.
     status: Optional[str] = None
-    m = _NL_STATUS_RE.search(text)
-    if m:
-        candidate = m.group(1).upper()
-        if candidate in _STATUS_VALUES:
-            status = candidate
-
-    # Bare "DONE" fallback if no "Status:" form found.
-    if status is None and _BARE_DONE_RE.search(text):
-        status = 'DONE'
-
-    # File path extraction — deduplicated, first-seen order.
     files: list = []
     seen: set = set()
 
-    for fm in _BACKTICK_PATH_RE.finditer(text):
-        token = fm.group(1).strip()
-        if _looks_like_path(token) and token not in seen:
-            files.append(token)
-            seen.add(token)
+    for line in text.splitlines():
+        # ---- Status detection (start-of-line ONLY) --------------------------
+        sm = _NL_STATUS_SOL_RE.match(line)
+        if sm:
+            candidate = sm.group(1).upper()
+            if candidate in _STATUS_VALUES and status is None:
+                status = candidate
 
-    for fm in _VERB_PATH_RE.finditer(text):
-        token = fm.group(1).strip().rstrip('.,;:)')
-        if _looks_like_path(token) and token not in seen:
-            files.append(token)
-            seen.add(token)
+        # ---- Files extraction (start-of-line ONLY) --------------------------
+        fm = _FILES_KEY_SOL_RE.match(line)
+        if fm:
+            for f in _parse_files_changed(fm.group(1)):
+                if f not in seen:
+                    files.append(f)
+                    seen.add(f)
 
     ran_tests = bool(_RAN_TESTS_RE.search(text))
 
@@ -227,7 +242,7 @@ def parse_claim(text: str) -> dict:
 
     Two-tier:
       1. ## Handoff block (structured, CAST-compatible, preferred).
-      2. Natural-language Status + path extraction (fallback).
+      2. Natural-language Status + anchored files extraction (fallback).
 
     CRITICAL RULE: a MISSING or unparseable claim always returns
     ``status=None, source="none"`` and MUST NEVER be treated as a false

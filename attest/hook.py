@@ -64,16 +64,32 @@ def _capture_if_requested(
     event: str,
     payload_dict: dict,
     transcript_path: str,
+    *,
+    raw: Optional[str] = None,
 ) -> None:
-    """Dump payload + transcript to fixtures/captured/ when ATTEST_CAPTURE=1."""
+    """Dump payload + transcript to fixtures/captured/ when ATTEST_CAPTURE=1.
+
+    Args:
+        event: 'start' or 'stop'.
+        payload_dict: normalized payload (from parse_payload).
+        transcript_path: path to copy for the transcript side-file.
+        raw: optional raw stdin string. When provided and ATTEST_CAPTURE=1,
+             also writes a '{event}-raw-{agent_id16}-{ts}.json' file
+             containing the verbatim stdin so callers can verify raw field names.
+    """
     if os.environ.get('ATTEST_CAPTURE', '').strip() != '1':
         return
 
-    # Locate repo root: walk up from __file__ looking for bin/ or attest/
-    here = os.path.dirname(os.path.abspath(__file__))
-    repo_root = os.path.dirname(here)  # attest/<pkg> → attest/ (repo root)
+    # Allow tests/CI to redirect capture writes without touching the real fixtures dir.
+    capture_dir_override = os.environ.get('ATTEST_CAPTURE_DIR', '').strip()
+    if capture_dir_override:
+        captured_dir = capture_dir_override
+    else:
+        # Locate repo root: walk up from __file__ looking for bin/ or attest/
+        here = os.path.dirname(os.path.abspath(__file__))
+        repo_root = os.path.dirname(here)  # attest/<pkg> → attest/ (repo root)
+        captured_dir = os.path.join(repo_root, 'fixtures', 'captured')
 
-    captured_dir = os.path.join(repo_root, 'fixtures', 'captured')
     try:
         os.makedirs(captured_dir, exist_ok=True)
     except OSError:
@@ -82,13 +98,22 @@ def _capture_if_requested(
     timestamp = str(int(time.time()))
     agent_id = payload_dict.get('agent_id', 'unknown')[:16]
 
-    # Write payload
+    # Write normalized payload
     payload_file = os.path.join(captured_dir, f'{event}-{agent_id}-{timestamp}.json')
     try:
         with open(payload_file, 'w', encoding='utf-8') as fh:
             json.dump(payload_dict, fh, indent=2)
     except OSError:
         pass
+
+    # Write raw stdin verbatim so field-name verification is possible.
+    if raw is not None:
+        raw_file = os.path.join(captured_dir, f'{event}-raw-{agent_id}-{timestamp}.json')
+        try:
+            with open(raw_file, 'w', encoding='utf-8') as fh:
+                fh.write(raw)
+        except OSError:
+            pass
 
     # Copy transcript if accessible
     if transcript_path and os.path.isfile(transcript_path):
@@ -103,11 +128,12 @@ def _capture_if_requested(
 # Public hook handlers
 # ---------------------------------------------------------------------------
 
-def on_start(payload_dict: dict) -> None:
+def on_start(payload_dict: dict, *, raw: Optional[str] = None) -> None:
     """Handle SubagentStart: snapshot the git tree and persist it.
 
     Args:
         payload_dict: output of hookio.parse_payload().
+        raw: optional verbatim stdin string forwarded to the capture helper.
     """
     key = state_mod.agent_key(payload_dict)
     cwd = payload_dict.get('cwd', '') or os.getcwd()
@@ -135,10 +161,10 @@ def on_start(payload_dict: dict) -> None:
     else:
         print(f'attest: start: snapshot stored for {key}', flush=True)
 
-    _capture_if_requested('start', payload_dict, payload_dict.get('transcript_path', ''))
+    _capture_if_requested('start', payload_dict, payload_dict.get('transcript_path', ''), raw=raw)
 
 
-def on_stop(payload_dict: dict) -> None:
+def on_stop(payload_dict: dict, *, raw: Optional[str] = None) -> None:
     """Handle SubagentStop: report in detect mode, or block a proven false DONE.
 
     Fail-open contract: this NEVER raises out, and emits a block decision on stdout
@@ -149,6 +175,7 @@ def on_stop(payload_dict: dict) -> None:
 
     Args:
         payload_dict: output of hookio.parse_payload().
+        raw: optional verbatim stdin string forwarded to the capture helper.
     """
     enforce = enforce_mod.enforcement_enabled()
     out = sys.stderr if enforce else sys.stdout
@@ -164,7 +191,7 @@ def on_stop(payload_dict: dict) -> None:
     session_id = payload_dict.get('session_id', '')
     transcript_path = payload_dict.get('transcript_path', '')
 
-    _capture_if_requested('stop', payload_dict, transcript_path)
+    _capture_if_requested('stop', payload_dict, transcript_path, raw=raw)
 
     # Load the start snapshot
     snap = state_mod.load_snapshot(key)
@@ -183,12 +210,21 @@ def on_stop(payload_dict: dict) -> None:
         state_mod.clear(key)
         return
 
-    # Get claim text: payload fast-path first, then transcript
+    # Get claim text: payload fast-path first, then transcript.
+    # For SubagentStop, prefer the subagent's own transcript (agent_transcript_path) over
+    # the parent session transcript (transcript_path) — the subagent's jsonl contains the
+    # actual completion message; the parent jsonl is the orchestrating session's file.
     claim_text: str = payload_dict.get('payload_text', '').strip()
     claim_source_label = 'payload'
-    if not claim_text and transcript_path:
-        claim_text = transcript_mod.last_assistant_text(transcript_path)
-        claim_source_label = 'transcript'
+    if not claim_text:
+        best_transcript = (
+            payload_dict.get('agent_transcript_path') or
+            payload_dict.get('transcript_path') or
+            ''
+        )
+        if best_transcript:
+            claim_text = transcript_mod.last_assistant_text(best_transcript)
+            claim_source_label = 'transcript'
 
     parsed = claim_mod.parse_claim(claim_text)
 
@@ -376,9 +412,9 @@ def main(argv: Optional[list] = None) -> int:
 
     try:
         if event == 'start':
-            on_start(payload)
+            on_start(payload, raw=raw)
         else:
-            on_stop(payload)
+            on_stop(payload, raw=raw)
     except Exception as exc:  # noqa: BLE001
         # Fail-open: never let an internal error surface as a non-zero exit
         print(f'attest: internal error in {event} handler: {exc} (non-fatal)', file=sys.stderr)

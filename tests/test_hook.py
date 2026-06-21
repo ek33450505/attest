@@ -246,6 +246,239 @@ class TestHookCaptureMode(unittest.TestCase):
                     pass
 
 
+class TestHookTranscriptPreference(unittest.TestCase):
+    """on_stop prefers agent_transcript_path over transcript_path for claim extraction."""
+
+    def setUp(self) -> None:
+        self.tmpdir = tempfile.mkdtemp()
+        self.repo = os.path.join(self.tmpdir, 'repo')
+        os.makedirs(self.repo)
+        _init_git_repo(self.repo)
+        self.db_path = os.path.join(self.tmpdir, 'state.db')
+        os.environ['ATTEST_STATE_DB'] = self.db_path
+        from attest import hook
+        self.hook = hook
+
+    def tearDown(self) -> None:
+        del os.environ['ATTEST_STATE_DB']
+
+    def test_on_stop_prefers_agent_transcript_path(self) -> None:
+        """When payload_text is empty, on_stop reads from agent_transcript_path, not transcript_path."""
+        agent_id = 'agent-transc-pref'
+        sess = 'sess-tp-1'
+
+        # Snapshot at start
+        payload_start = _make_payload(agent_id, sess, self.repo)
+        with patch('sys.stdout', io.StringIO()):
+            self.hook.on_start(payload_start)
+
+        # Payload with no payload_text but with both transcript paths.
+        # last_assistant_text is mocked to return a claim only for the subagent path.
+        subagent_path = '/subagents/agent-abc.jsonl'
+        parent_path = '/parent/session.jsonl'
+
+        def fake_last_assistant_text(path: str) -> str:
+            if path == subagent_path:
+                return '## Handoff\nfiles_changed: src/real.py\nstatus: DONE\nblockers: none\n'
+            return ''  # parent transcript has no usable content
+
+        payload_stop = {
+            'agent_id': agent_id,
+            'agent_type': 'code-writer',
+            'session_id': sess,
+            'stop_reason': 'end_turn',
+            'transcript_path': parent_path,
+            'agent_transcript_path': subagent_path,
+            'cwd': self.repo,
+            'stop_hook_active': False,
+            'payload_text': '',  # fast-path empty — must fall through to transcript
+        }
+
+        captured = io.StringIO()
+        with patch('attest.hook.transcript_mod.last_assistant_text', side_effect=fake_last_assistant_text), \
+             patch('sys.stdout', captured):
+            self.hook.on_stop(payload_stop)
+
+        output = captured.getvalue()
+        # The claim was extracted (not source=none) — meaning the subagent transcript was used.
+        self.assertNotIn('claim source=none', output)
+        # src/real.py was claimed but not actually written → MISMATCH expected
+        self.assertIn('src/real.py', output)
+
+    def test_on_stop_falls_back_to_transcript_path_if_no_agent_transcript(self) -> None:
+        """When agent_transcript_path is absent, on_stop falls back to transcript_path."""
+        agent_id = 'agent-transc-fallback'
+        sess = 'sess-tf-1'
+
+        payload_start = _make_payload(agent_id, sess, self.repo)
+        with patch('sys.stdout', io.StringIO()):
+            self.hook.on_start(payload_start)
+
+        parent_path = '/parent/only.jsonl'
+
+        def fake_last_assistant_text(path: str) -> str:
+            if path == parent_path:
+                return '## Handoff\nfiles_changed: src/fallback.py\nstatus: DONE\nblockers: none\n'
+            return ''
+
+        payload_stop = {
+            'agent_id': agent_id,
+            'agent_type': 'code-writer',
+            'session_id': sess,
+            'stop_reason': 'end_turn',
+            'transcript_path': parent_path,
+            'agent_transcript_path': '',  # absent — should fall back to transcript_path
+            'cwd': self.repo,
+            'stop_hook_active': False,
+            'payload_text': '',
+        }
+
+        captured = io.StringIO()
+        with patch('attest.hook.transcript_mod.last_assistant_text', side_effect=fake_last_assistant_text), \
+             patch('sys.stdout', captured):
+            self.hook.on_stop(payload_stop)
+
+        output = captured.getvalue()
+        # Claim was extracted from the fallback transcript
+        self.assertNotIn('claim source=none', output)
+        self.assertIn('src/fallback.py', output)
+
+
+class TestHookRawCapture(unittest.TestCase):
+    """ATTEST_CAPTURE=1 with raw= writes a raw stdin file alongside the normalized payload."""
+
+    def setUp(self) -> None:
+        self.tmpdir = tempfile.mkdtemp()
+        self.capture_dir = os.path.join(self.tmpdir, 'captured')
+        os.makedirs(self.capture_dir)
+        os.environ['ATTEST_CAPTURE'] = '1'
+        os.environ['ATTEST_CAPTURE_DIR'] = self.capture_dir
+        os.environ['ATTEST_STATE_DB'] = os.path.join(self.tmpdir, 'state.db')
+        from attest import hook
+        self.hook = hook
+
+    def tearDown(self) -> None:
+        del os.environ['ATTEST_CAPTURE']
+        del os.environ['ATTEST_CAPTURE_DIR']
+        del os.environ['ATTEST_STATE_DB']
+
+    def test_raw_capture_writes_raw_file(self) -> None:
+        """When raw= is provided, _capture_if_requested writes a *-raw-* JSON file."""
+        raw_str = '{"agent_id":"rawtest","agent_type":"code-writer","session_id":"s-raw","cwd":"/tmp"}'
+        payload = {
+            'agent_id': 'rawtest',
+            'agent_type': 'code-writer',
+            'session_id': 's-raw',
+            'stop_reason': 'end_turn',
+            'transcript_path': '',
+            'agent_transcript_path': '',
+            'cwd': self.tmpdir,
+            'stop_hook_active': False,
+            'payload_text': '',
+        }
+
+        with patch('sys.stdout', io.StringIO()):
+            self.hook._capture_if_requested('stop', payload, '', raw=raw_str)
+
+        files = os.listdir(self.capture_dir)
+        # Raw files have the literal '-raw-' segment: stop-raw-{agent_id}-{ts}.json
+        raw_files = [f for f in files if f.startswith('stop-raw-')]
+        self.assertTrue(len(raw_files) >= 1, f'Expected a raw capture file, got: {files}')
+
+        # The raw file contains the verbatim stdin string
+        raw_file_path = os.path.join(self.capture_dir, raw_files[0])
+        with open(raw_file_path, encoding='utf-8') as fh:
+            content = fh.read()
+        self.assertEqual(content, raw_str)
+
+    def test_normalized_payload_file_also_written(self) -> None:
+        """Normalized payload file is still written alongside the raw file."""
+        raw_str = '{"agent_id":"rawtest2","agent_type":"code-writer"}'
+        payload = {
+            'agent_id': 'rawtest2',
+            'agent_type': 'code-writer',
+            'session_id': 's-raw2',
+            'stop_reason': '',
+            'transcript_path': '',
+            'agent_transcript_path': '',
+            'cwd': self.tmpdir,
+            'stop_hook_active': False,
+            'payload_text': '',
+        }
+
+        with patch('sys.stdout', io.StringIO()):
+            self.hook._capture_if_requested('start', payload, '', raw=raw_str)
+
+        files = os.listdir(self.capture_dir)
+        normalized_files = [f for f in files if f.startswith('start-rawtest2')]
+        raw_files = [f for f in files if f.startswith('start-raw-rawtest2')]
+        self.assertTrue(len(normalized_files) >= 1, f'Expected normalized file, got: {files}')
+        self.assertTrue(len(raw_files) >= 1, f'Expected raw file, got: {files}')
+
+    def test_no_raw_file_when_raw_is_none(self) -> None:
+        """When raw= is not provided, no raw file is written."""
+        payload = {
+            'agent_id': 'norawarg',
+            'agent_type': 'test',
+            'session_id': 's-noraw',
+            'stop_reason': '',
+            'transcript_path': '',
+            'agent_transcript_path': '',
+            'cwd': self.tmpdir,
+            'stop_hook_active': False,
+            'payload_text': '',
+        }
+
+        with patch('sys.stdout', io.StringIO()):
+            self.hook._capture_if_requested('stop', payload, '', raw=None)
+
+        files = os.listdir(self.capture_dir)
+        # Raw files are named '{event}-raw-{agent_id}-{ts}.json'
+        # Use a startswith prefix so agent_ids that happen to contain 'raw' don't false-match.
+        raw_files = [f for f in files if f.startswith('stop-raw-')]
+        self.assertEqual(raw_files, [], f'No raw files expected, got: {raw_files}')
+
+    def test_no_capture_when_attest_capture_off(self) -> None:
+        """When ATTEST_CAPTURE != '1', no files are written even if raw= is passed."""
+        del os.environ['ATTEST_CAPTURE']
+        try:
+            payload = {
+                'agent_id': 'off',
+                'agent_type': 'test',
+                'session_id': 's-off',
+                'stop_reason': '',
+                'transcript_path': '',
+                'agent_transcript_path': '',
+                'cwd': self.tmpdir,
+                'stop_hook_active': False,
+                'payload_text': '',
+            }
+            self.hook._capture_if_requested('stop', payload, '', raw='{"raw":"data"}')
+            files = os.listdir(self.capture_dir)
+            self.assertEqual(files, [])
+        finally:
+            os.environ['ATTEST_CAPTURE'] = '1'  # restore for tearDown symmetry
+
+    def test_main_passes_raw_to_handlers(self) -> None:
+        """main() passes the raw stdin string through to on_start/on_stop so capture works."""
+        raw_payload = json.dumps({
+            'agent_id': 'main-raw-test',
+            'agent_type': 'code-writer',
+            'session_id': 's-main',
+            'cwd': self.tmpdir,
+        })
+
+        from attest.hook import main
+        with patch('sys.stdin', io.StringIO(raw_payload)), \
+             patch('sys.stdout', io.StringIO()):
+            main(['start'])
+
+        files = os.listdir(self.capture_dir)
+        # Raw files: start-raw-{agent_id}-{ts}.json
+        raw_files = [f for f in files if f.startswith('start-raw-')]
+        self.assertTrue(len(raw_files) >= 1, f'Expected raw file from main(), got: {files}')
+
+
 class TestHookMain(unittest.TestCase):
     """Test the CLI main() entry point."""
 

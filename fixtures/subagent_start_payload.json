@@ -1,0 +1,10 @@
+{
+  "_captured": true,
+  "_note": "Real SubagentStart payload captured from Claude Code v2.1.170 (2026-06-21, P1 ship-gate). Paths/username sanitized; run ids kept verbatim.",
+  "session_id": "634edb84-87dc-4255-b130-8251154cbfd7",
+  "transcript_path": "/Users/dev/.claude/projects/-tmp-attest-test-repo/634edb84-87dc-4255-b130-8251154cbfd7.jsonl",
+  "cwd": "/tmp/attest-test-repo",
+  "agent_id": "aa333a780eca6d224",
+  "agent_type": "general-purpose",
+  "hook_event_name": "SubagentStart"
+}
