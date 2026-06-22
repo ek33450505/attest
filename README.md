@@ -67,6 +67,21 @@ The claim parser is conservative by construction: a missing or prose-only claim 
 `status=None` and is **never** treated as a false `DONE`. A path mentioned in prose never
 becomes a claimed file.
 
+### What the report looks like
+
+In detect mode (the default), the stop hook prints to stdout after every subagent completes:
+
+```text
+attest: stop: <key>: CLAIMED [a.py] OBSERVED [a.py] -> OK [source=payload]
+attest: stop: <key>: CLAIMED [a.py, b.py] OBSERVED [a.py] -> MISMATCH: b.py claimed-but-unchanged (would block in enforce mode) [source=payload]
+attest: stop: <key>: CLAIMED [a.py] OBSERVED [a.py, c.py] -> SCOPE_CREEP: c.py observed-but-unclaimed [source=payload]
+attest: stop: <key>: claim source=none — cannot verify (never treating as false DONE)
+```
+
+`<key>` is the agent identifier; `source=payload` or `source=transcript` shows where the
+claim was read from. In enforce mode (`ATTEST_ENFORCE=1`) the human-readable lines move to
+stderr and the `(would block in enforce mode)` cases become real blocks.
+
 ## Install
 
 Hooks take effect on a **new session** — restart Claude Code after installing. The
