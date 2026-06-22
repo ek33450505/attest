@@ -66,13 +66,7 @@ brew tap ek33450505/attest
 brew install attest
 ```
 
-Two honest caveats:
-
-1. **The tap is not live until launch.** The formula's `url` points at the
-   `v0.1.0` release tarball and its `sha256` is still a placeholder
-   (`0000…0000`) pending the tag. Until v0.1.0 is tagged and the checksum is
-   filled in, `brew install` will not succeed against the public tap.
-2. **Homebrew installs the CLI only — not the hooks.** The formula installs the
+One honest caveat: **Homebrew installs the CLI only — not the hooks.** The formula installs the
    `attest` command (used for `attest --version`, `attest snapshot`, `attest
    verify`). To wire the `SubagentStart`/`SubagentStop` hooks into Claude Code
    you still need the plugin (option **a**) or `install.sh` (option **c**). The
@@ -233,7 +227,7 @@ failure) **allows**. The full allow/block truth table lives in
 6. **Confirm the CLI** is reachable (Homebrew install, or via `bin/attest`):
 
    ```bash
-   attest --version          # -> attest 0.1.0
+   attest --version          # -> attest 0.1.1
    attest snapshot --repo .   # JSON snapshot of the working-tree delta
    ```
 
