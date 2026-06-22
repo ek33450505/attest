@@ -6,7 +6,8 @@
 # working tree so attest-subagent-stop.sh can compute the delta after the
 # agent completes.
 #
-# Exit code: always 0 (detect-and-print mode — never blocks in Phase 1b).
+# Exit code: always 0. Always exits cleanly; never blocks a subagent by design.
+# This shim only snapshots the working tree — detect mode by default.
 #
 # ── Installation (add to ~/.claude/settings.json) ────────────────────────────
 #   "SubagentStart": [
@@ -22,10 +23,10 @@
 # ─────────────────────────────────────────────────────────────────────────────
 #
 # Environment variables:
-#   ATTEST_STATE_DB   — path to the attest state SQLite DB
-#                       (default: ~/.attest/state.db)
-#   ATTEST_CAPTURE    — set to 1 to dump payload + transcript to fixtures/captured/
-#   ATTEST_PYTHON     — override the python3 binary (default: python3)
+#   See README.md "Enforcement (opt-in)" table or docs/INSTALL.md
+#   "Configuration (environment variables)" for the full canonical set.
+#   This shim reads ATTEST_PYTHON directly (default: python3); all other
+#   vars are passed through to the Python handler at runtime.
 
 # Never fail loudly — a broken hook must not interrupt the parent session.
 set +e
@@ -51,6 +52,8 @@ if ! command -v "$PYTHON" >/dev/null 2>&1; then
 fi
 
 # ── Locate the attest package ─────────────────────────────────────────────────
+# shellcheck disable=SC2015  # Intentional A && B || C: pwd cannot fail after a
+# successful cd, so the `dirname "$0"` fallback runs only when cd itself fails.
 SCRIPT_DIR="$(cd "$(dirname "$0")" 2>/dev/null && pwd || dirname "$0")"
 ATTEST_REPO="$(dirname "$SCRIPT_DIR")"
 

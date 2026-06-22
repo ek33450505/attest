@@ -19,12 +19,20 @@ empirical proof that `SubagentStop` can block on Claude Code v2.1.170, see
 
 | Requirement | Why |
 | --- | --- |
-| **Python 3** (stdlib only) | The hook handler is `python -m attest.hook`. No `pip install` — there are zero third-party dependencies. `install.sh` aborts if `python3` is not on `PATH`. |
+| **Python 3.9+** (stdlib only) | The hook handler is `python -m attest.hook`. No `pip install` — there are zero third-party dependencies. `install.sh` aborts if `python3` is not on `PATH`. |
 | **git** | Attest computes its ground truth from `git status --porcelain` against `HEAD`. Outside a git repo, every verdict fails open (allows). |
 | **Claude Code v2.1.170** | Enforcement (blocking a false `DONE`) relies on a `SubagentStop` command hook honoring a `{"decision":"block"}` stdout. This was empirically confirmed on **v2.1.170** (the exact version validated; see [./VALIDATION.md](./VALIDATION.md)). The behavior is **undocumented** and could change in a future release — if it does, enforce mode degrades cleanly to detect-only / fail-open. Detect mode works on any version. |
 
 > Detect mode (the default) only reads. It never blocks, never writes to your
 > repo, and is safe to run anywhere.
+
+> **Windows / WSL note:** The hooks are bash scripts — both install paths register
+> them as `bash ".../attest-subagent-*.sh"` (see `hooks/hooks.json` and
+> `install.sh`). Native Windows without a POSIX shell on `PATH` cannot run them.
+> The recommended path is to run Claude Code under **WSL** (Windows Subsystem for
+> Linux) or any environment that provides `bash`, `git`, and `python3` on `PATH`,
+> where Attest works normally. See also [LIMITATIONS.md §7](./LIMITATIONS.md#7-path-form-fail-open-cases)
+> for the case-insensitive-filesystem caveat that applies on Windows (and macOS).
 
 ---
 

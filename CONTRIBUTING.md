@@ -54,6 +54,17 @@ Clone the repo and you are ready to run the tests.
 
 Run both suites **from the repository root**.
 
+The quickest way is:
+
+```sh
+make test
+```
+
+This runs the Python suite first, then BATS. It exits non-zero if either suite
+fails. The individual targets are also available (`make test-py`, `make test-bats`).
+
+The raw commands — mirrored exactly by `make test` — are:
+
 Python (270 tests):
 
 ```sh
@@ -72,6 +83,21 @@ Expect 20 `ok` lines.
 
 That is **290 tests total** (270 Python unittest + 20 BATS). CI runs both suites
 on every push and pull request; a PR cannot merge with a red suite.
+
+## Linting
+
+The shell scripts (`hooks/*.sh`, `install.sh`, `scripts/*.sh`) are linted with
+[ShellCheck](https://www.shellcheck.net/) in CI. To run it locally:
+
+```sh
+shellcheck hooks/*.sh install.sh scripts/*.sh
+```
+
+This must pass with **no findings**. The hook shims deliberately use `set +e` and
+a fail-open `A && B || C` idiom when resolving their own directory; that single
+SC2015 case carries a narrowly-scoped `# shellcheck disable=SC2015` with a
+justifying comment at the line. Do not add blanket suppressions — disable a
+specific code at a specific line, with a comment explaining why.
 
 ## Test conventions
 

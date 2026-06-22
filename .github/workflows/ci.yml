@@ -9,14 +9,17 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.9", "3.10", "3.11", "3.12", "3.13"]
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
 
-      - name: Set up Python
+      - name: Set up Python ${{ matrix.python-version }}
         uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: ${{ matrix.python-version }}
 
       - name: Install BATS
         run: sudo apt-get update && sudo apt-get install -y bats
@@ -26,3 +29,13 @@ jobs:
 
       - name: Run BATS suite
         run: bats tests/*.bats
+
+  shellcheck:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Run ShellCheck
+        # shellcheck is preinstalled on ubuntu-latest; no install step needed.
+        run: shellcheck hooks/*.sh install.sh scripts/*.sh
