@@ -39,10 +39,32 @@ def _db_path() -> str:
 
 
 def _open_db() -> sqlite3.Connection:
-    """Open (and initialise) the state DB, creating directories as needed."""
+    """Open (and initialise) the state DB, creating directories as needed.
+
+    Security: the parent directory is chmoded to 0o700 and the DB file to 0o600
+    so neither is world-readable.  Both chmod calls are best-effort — a failure
+    (e.g. on a read-only or foreign-owned filesystem) degrades to a no-op and
+    NEVER raises out of this function.  The WAL sidecars (-wal/-shm) are
+    protected implicitly by the 0o700 directory.
+    """
     path = _db_path()
-    os.makedirs(os.path.dirname(path), exist_ok=True)
+    dirname = os.path.dirname(path)
+    try:
+        os.makedirs(dirname, exist_ok=True)
+    except OSError:
+        pass
+    # Harden the directory — also fixes pre-existing dirs that makedirs skips
+    # when exist_ok=True (e.g. ~/.attest already existed world-readable).
+    try:
+        os.chmod(dirname, 0o700)
+    except OSError:
+        pass
     conn = sqlite3.connect(path, timeout=5)
+    # Harden the DB file itself (WAL sidecars inherit directory protection).
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
     conn.execute('PRAGMA journal_mode=WAL')
     conn.execute('''
         CREATE TABLE IF NOT EXISTS snapshots (
