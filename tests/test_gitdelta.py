@@ -428,6 +428,27 @@ class TestSha256FileHashCap(unittest.TestCase):
         """The module-level constant equals 10 MB."""
         self.assertEqual(_MAX_HASH_BYTES, 10 * 1024 * 1024)
 
+    def test_malformed_env_nonumber_does_not_raise(self) -> None:
+        """A non-numeric ATTEST_MAX_HASH_BYTES must not raise (fail-open regression).
+
+        Bad parse would ValueError in the hot path → hook crash → fail-CLOSED violation.
+        Fallback to _MAX_HASH_BYTES means a small file still returns normal sha256 hex.
+        """
+        os.environ['ATTEST_MAX_HASH_BYTES'] = 'not-a-number'
+        p = self._write('small_fallback.py', b'x = 1\n')
+        result = _sha256_file(p)  # must not raise
+        self.assertRegex(result, r'^[0-9a-f]{64}$')
+
+    def test_malformed_env_empty_string_does_not_raise(self) -> None:
+        """An empty ATTEST_MAX_HASH_BYTES must not raise (fail-open regression).
+
+        int("") raises ValueError; the guard must catch it and fall back to default.
+        """
+        os.environ['ATTEST_MAX_HASH_BYTES'] = ''
+        p = self._write('small_fallback2.py', b'y = 2\n')
+        result = _sha256_file(p)  # must not raise
+        self.assertRegex(result, r'^[0-9a-f]{64}$')
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -125,7 +125,10 @@ def _sha256_file(path: str) -> str:
     Returns _DELETED_SENTINEL if the file cannot be read (deleted, permission
     denied, etc.).
     """
-    max_bytes = int(os.environ.get('ATTEST_MAX_HASH_BYTES', _MAX_HASH_BYTES))
+    try:
+        max_bytes = int(os.environ.get('ATTEST_MAX_HASH_BYTES', _MAX_HASH_BYTES))
+    except (ValueError, TypeError):
+        max_bytes = _MAX_HASH_BYTES
     try:
         st = os.stat(path)
         if st.st_size > max_bytes:
