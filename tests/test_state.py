@@ -8,9 +8,11 @@ Covers:
   - clear() removes the snapshot (idempotent)
   - save_snapshot() returns False on unwritable path (error path)
   - mirror_to_cast_db() no-ops gracefully when cast.db absent
+  - DB file and parent directory are private (0o600 / 0o700) after creation
 """
 import json
 import os
+import stat
 import tempfile
 import unittest
 
@@ -201,6 +203,37 @@ class TestSessionBlocks(unittest.TestCase):
         self.state.increment_session_blocks('sess-A', '/repo')
         self.state.clear('agent-x')
         self.assertEqual(self.state.get_session_blocks('sess-A', '/repo'), 1)
+
+
+class TestDbPermissions(unittest.TestCase):
+    """2026-06-22 audit fix: DB file and parent dir must be private after creation."""
+
+    def setUp(self) -> None:
+        self.tmpdir = tempfile.mkdtemp()
+        # Use a subdirectory so _open_db must create it (exercises makedirs + chmod).
+        self.db_dir = os.path.join(self.tmpdir, 'attest_sub')
+        self.db_path = os.path.join(self.db_dir, 'state.db')
+        os.environ['ATTEST_STATE_DB'] = self.db_path
+        import importlib
+        import attest.state as _state_mod
+        importlib.reload(_state_mod)
+        from attest import state
+        self.state = state
+
+    def tearDown(self) -> None:
+        del os.environ['ATTEST_STATE_DB']
+
+    def test_db_file_is_0o600(self) -> None:
+        """state.db must not be world-readable (stores session IDs, repo paths)."""
+        self.state.save_snapshot('perm-test', {'a.py': 'h'})
+        mode = stat.S_IMODE(os.stat(self.db_path).st_mode)
+        self.assertEqual(mode, 0o600, f'Expected 0o600, got {oct(mode)}')
+
+    def test_db_dir_is_0o700(self) -> None:
+        """Parent directory of state.db must be private (protects WAL sidecars too)."""
+        self.state.save_snapshot('perm-test', {'a.py': 'h'})
+        mode = stat.S_IMODE(os.stat(self.db_dir).st_mode)
+        self.assertEqual(mode, 0o700, f'Expected 0o700, got {oct(mode)}')
 
 
 class TestSchemaMigration(unittest.TestCase):

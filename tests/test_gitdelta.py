@@ -23,6 +23,7 @@ import unittest
 
 from attest.gitdelta import (
     snapshot, delta, NotAGitRepo, _DELETED_SENTINEL, repo_root, path_on_disk,
+    _sha256_file, _MAX_HASH_BYTES,
 )
 
 
@@ -349,6 +350,104 @@ class TestNotAGitRepo(unittest.TestCase):
             'git' in snap['_error'].lower() or 'repo' in snap['_error'].lower(),
             f"Unexpected error message: {snap['_error']!r}",
         )
+
+
+class TestSha256FileHashCap(unittest.TestCase):
+    """2026-06-22 audit fix: large files return a meta fingerprint, not a content hash."""
+
+    # Use an env-override threshold of 100 bytes so tests stay fast.
+    _SMALL_THRESHOLD = '100'
+
+    def setUp(self) -> None:
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.dir = self._tmpdir.name
+        os.environ['ATTEST_MAX_HASH_BYTES'] = self._SMALL_THRESHOLD
+
+    def tearDown(self) -> None:
+        del os.environ['ATTEST_MAX_HASH_BYTES']
+        self._tmpdir.cleanup()
+
+    def _write(self, name: str, content: bytes) -> str:
+        p = os.path.join(self.dir, name)
+        with open(p, 'wb') as fh:
+            fh.write(content)
+        return p
+
+    def test_large_file_yields_meta_prefix(self) -> None:
+        """A file exceeding the threshold returns a ``meta:``-prefixed fingerprint."""
+        p = self._write('big.bin', b'x' * 200)  # 200 > 100 byte threshold
+        result = _sha256_file(p)
+        self.assertTrue(result.startswith('meta:'), f'Expected meta: prefix, got {result!r}')
+
+    def test_large_file_fingerprint_not_hex64(self) -> None:
+        """The meta fingerprint is not a 64-char hex string (no collision with sha256)."""
+        p = self._write('big2.bin', b'y' * 200)
+        result = _sha256_file(p)
+        # sha256 hex is exactly 64 lowercase hex chars — meta prefix breaks this.
+        self.assertNotRegex(result, r'^[0-9a-f]{64}$')
+
+    def test_large_file_content_not_read(self) -> None:
+        """Content of a large file is NOT read (builtin open is never called for it)."""
+        from unittest.mock import patch
+        p = self._write('big3.bin', b'z' * 200)
+        with patch('builtins.open') as mock_open:
+            _sha256_file(p)
+        mock_open.assert_not_called()
+
+    def test_large_file_fingerprint_changes_on_content_write(self) -> None:
+        """Appending bytes to a large file changes its fingerprint (size changes)."""
+        p = self._write('large_mut.bin', b'a' * 200)
+        fp1 = _sha256_file(p)
+        with open(p, 'ab') as fh:
+            fh.write(b'b' * 50)  # size now 250 — still > 100 threshold
+        fp2 = _sha256_file(p)
+        self.assertNotEqual(fp1, fp2)
+
+    def test_large_file_fingerprint_changes_on_mtime_touch(self) -> None:
+        """Touching a large file's mtime changes its fingerprint (mtime_ns changes)."""
+        p = self._write('large_touch.bin', b'c' * 200)
+        fp1 = _sha256_file(p)
+        # Advance mtime by 2 seconds to guarantee st_mtime_ns differs.
+        current = os.stat(p)
+        os.utime(p, (current.st_atime + 2, current.st_mtime + 2))
+        fp2 = _sha256_file(p)
+        self.assertNotEqual(fp1, fp2)
+
+    def test_small_file_yields_64_char_hex(self) -> None:
+        """A file at or below the threshold yields a real SHA-256 hex digest."""
+        p = self._write('small.py', b'x = 1\n')  # 6 bytes < 100 byte threshold
+        result = _sha256_file(p)
+        self.assertRegex(result, r'^[0-9a-f]{64}$')
+
+    def test_missing_file_returns_deleted_sentinel(self) -> None:
+        """A path that does not exist returns _DELETED_SENTINEL (unchanged behaviour)."""
+        result = _sha256_file(os.path.join(self.dir, 'ghost.py'))
+        self.assertEqual(result, _DELETED_SENTINEL)
+
+    def test_default_threshold_is_10mb(self) -> None:
+        """The module-level constant equals 10 MB."""
+        self.assertEqual(_MAX_HASH_BYTES, 10 * 1024 * 1024)
+
+    def test_malformed_env_nonumber_does_not_raise(self) -> None:
+        """A non-numeric ATTEST_MAX_HASH_BYTES must not raise (fail-open regression).
+
+        Bad parse would ValueError in the hot path → hook crash → fail-CLOSED violation.
+        Fallback to _MAX_HASH_BYTES means a small file still returns normal sha256 hex.
+        """
+        os.environ['ATTEST_MAX_HASH_BYTES'] = 'not-a-number'
+        p = self._write('small_fallback.py', b'x = 1\n')
+        result = _sha256_file(p)  # must not raise
+        self.assertRegex(result, r'^[0-9a-f]{64}$')
+
+    def test_malformed_env_empty_string_does_not_raise(self) -> None:
+        """An empty ATTEST_MAX_HASH_BYTES must not raise (fail-open regression).
+
+        int("") raises ValueError; the guard must catch it and fall back to default.
+        """
+        os.environ['ATTEST_MAX_HASH_BYTES'] = ''
+        p = self._write('small_fallback2.py', b'y = 2\n')
+        result = _sha256_file(p)  # must not raise
+        self.assertRegex(result, r'^[0-9a-f]{64}$')
 
 
 if __name__ == '__main__':
