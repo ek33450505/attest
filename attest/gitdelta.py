@@ -25,6 +25,14 @@ from typing import Optional
 # Sentinel stored for deleted files in a snapshot.
 _DELETED_SENTINEL = '\x00DELETED\x00'
 
+# Files larger than this are fingerprinted by metadata (size + mtime_ns) rather
+# than content, so the synchronous stop-hook is never stalled by a large binary.
+# A real write changes size or mtime → fingerprint changes → change is still
+# detected.  A sha256 hex digest is always 64 lowercase hex chars with no colon,
+# so the "meta:" prefix guarantees zero collision with a real hash.
+# Override at runtime via the ATTEST_MAX_HASH_BYTES environment variable.
+_MAX_HASH_BYTES = 10 * 1024 * 1024  # 10 MB default
+
 
 class NotAGitRepo(Exception):
     """Raised when a directory is not inside a git repository."""
@@ -103,8 +111,29 @@ def path_on_disk(root: str, path: str, cwd: str = '') -> bool:
 def _sha256_file(path: str) -> str:
     """Return the SHA-256 hex digest of the file at path.
 
-    Returns _DELETED_SENTINEL if the file cannot be read (deleted, permission denied, etc.).
+    For files whose size exceeds _MAX_HASH_BYTES (default 10 MB, overridable
+    via the ATTEST_MAX_HASH_BYTES env var), a metadata fingerprint is returned
+    instead of reading the file content:
+
+        ``meta:<size>:<mtime_ns>``
+
+    Semantic safety: any real write changes at least one of size or mtime, so
+    the fingerprint changes → the change is still detected.  A sha256 hex digest
+    is exactly 64 lowercase hex chars with no colon, so the ``meta:`` prefix
+    guarantees no collision with a real hash and no false OK / false block.
+
+    Returns _DELETED_SENTINEL if the file cannot be read (deleted, permission
+    denied, etc.).
     """
+    max_bytes = int(os.environ.get('ATTEST_MAX_HASH_BYTES', _MAX_HASH_BYTES))
+    try:
+        st = os.stat(path)
+        if st.st_size > max_bytes:
+            # Large file: skip content read; fingerprint on size + mtime_ns.
+            return f'meta:{st.st_size}:{st.st_mtime_ns}'
+    except (IOError, OSError):
+        return _DELETED_SENTINEL
+
     h = hashlib.sha256()
     try:
         with open(path, 'rb') as fh:
