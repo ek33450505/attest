@@ -204,7 +204,7 @@ setup_scratch() {
 	info "work (all dumper output, outside repo): ${WORK_DIR}"
 }
 
-# shellcheck disable=SC2329  # invoked indirectly via `trap cleanup EXIT`
+# shellcheck disable=SC2329,SC2317  # invoked indirectly via `trap cleanup EXIT`; the body is reachable through the trap (older shellcheck flags it as unreachable)
 cleanup() {
 	local rc=$?   # preserve the exit code that triggered the EXIT trap
 	if [[ "$KEEP" -eq 1 ]]; then
