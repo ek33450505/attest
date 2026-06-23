@@ -65,7 +65,7 @@ ATTEST_REPO="$(dirname "$SCRIPT_DIR")"
 # stderr; route them to the error log (not /dev/null) so enforce-mode decisions
 # are observable, and so the hook's stdout stays pure JSON.
 ATTEST_LOG="${HOME}/.claude/logs/attest-errors.log"
-echo "$INPUT" | PYTHONPATH="$ATTEST_REPO:${PYTHONPATH:-}" \
+printf '%s\n' "$INPUT" | PYTHONPATH="$ATTEST_REPO:${PYTHONPATH:-}" \
   "$PYTHON" -m attest.hook stop 2>>"$ATTEST_LOG" || \
   _log_error "attest.hook stop failed (exit $?)"
 

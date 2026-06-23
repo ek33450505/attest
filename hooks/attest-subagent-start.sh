@@ -58,7 +58,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" 2>/dev/null && pwd || dirname "$0")"
 ATTEST_REPO="$(dirname "$SCRIPT_DIR")"
 
 # ── Dispatch to the Python hook handler ──────────────────────────────────────
-echo "$INPUT" | PYTHONPATH="$ATTEST_REPO:${PYTHONPATH:-}" \
+printf '%s\n' "$INPUT" | PYTHONPATH="$ATTEST_REPO:${PYTHONPATH:-}" \
   "$PYTHON" -m attest.hook start 2>/dev/null || \
   _log_error "attest.hook start failed (exit $?)"
 
