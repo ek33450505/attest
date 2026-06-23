@@ -37,6 +37,10 @@ Return value of parse_claim():
 import re
 from typing import Optional
 
+# Matches lines that open or close a fenced code block (``` or ~~~).
+# Used in _parse_nl() to skip Status/files detection while inside a fence.
+_FENCE_RE = re.compile(r'^[ \t]*(```|~~~)')
+
 # ---------------------------------------------------------------------------
 # Tier 1 — ## Handoff block (mirrors cast_handoff_parser.py exactly)
 # ---------------------------------------------------------------------------
@@ -204,8 +208,16 @@ def _parse_nl(text: str) -> dict:
     status: Optional[str] = None
     files: list = []
     seen: set = set()
+    in_code_block: bool = False
 
     for line in text.splitlines():
+        # ---- Code-fence tracking — skip detection inside fences (I1/I4) -----
+        if _FENCE_RE.match(line):
+            in_code_block = not in_code_block
+            continue
+        if in_code_block:
+            continue
+
         # ---- Status detection (start-of-line ONLY) --------------------------
         sm = _NL_STATUS_SOL_RE.match(line)
         if sm:

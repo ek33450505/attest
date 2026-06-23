@@ -215,3 +215,31 @@ class TestParsePayload(unittest.TestCase):
         """Empty payload returns agent_transcript_path as empty string."""
         result = self.parse_payload('{}')
         self.assertEqual(result['agent_transcript_path'], '')
+
+    def test_stop_hook_active_string_false_is_false(self) -> None:
+        """Fix: JSON string "false" must NOT be truthy for stop_hook_active."""
+        raw = json.dumps({'agent_type': 'test', 'stop_hook_active': 'false'})
+        result = self.parse_payload(raw)
+        self.assertFalse(result['stop_hook_active'],
+                         '"false" (string) must parse as False, not True')
+
+    def test_stop_hook_active_string_true_is_false(self) -> None:
+        """Fix: JSON string "true" must NOT be truthy — only real bool true counts."""
+        raw = json.dumps({'agent_type': 'test', 'stop_hook_active': 'true'})
+        result = self.parse_payload(raw)
+        self.assertFalse(result['stop_hook_active'],
+                         '"true" (string) must parse as False; only bool True is accepted')
+
+    def test_stop_hook_active_integer_zero_is_false(self) -> None:
+        """Fix: integer 0 must NOT be truthy for stop_hook_active."""
+        raw = json.dumps({'agent_type': 'test', 'stop_hook_active': 0})
+        result = self.parse_payload(raw)
+        self.assertFalse(result['stop_hook_active'],
+                         'integer 0 must parse as False')
+
+    def test_stop_hook_active_integer_one_is_false(self) -> None:
+        """Fix: integer 1 is not a JSON boolean true — must parse as False."""
+        raw = json.dumps({'agent_type': 'test', 'stop_hook_active': 1})
+        result = self.parse_payload(raw)
+        self.assertFalse(result['stop_hook_active'],
+                         'integer 1 is not bool True; must parse as False')

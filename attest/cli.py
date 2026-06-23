@@ -22,7 +22,7 @@ from typing import Optional
 
 from attest import __version__
 from attest.claim import parse_claim
-from attest.gitdelta import snapshot, delta, NotAGitRepo
+from attest.gitdelta import snapshot, delta
 from attest.verdict import evaluate
 
 
@@ -71,11 +71,15 @@ def _cmd_verify(args: argparse.Namespace) -> int:
     # Compute the observed delta.
     try:
         observed = delta(before, args.repo)
-    except NotAGitRepo as exc:
-        _print_error(str(exc))
-        return 1
     except Exception as exc:  # noqa: BLE001
         _print_error(f'Failed to compute delta: {exc}')
+        return 1
+
+    if not observed.get('reliable', True):
+        _print_error(
+            f'Delta unreliable for repo {args.repo!r}: '
+            'not a git repository or git error occurred — cannot verify claim'
+        )
         return 1
 
     # Parse the claim and evaluate the verdict.

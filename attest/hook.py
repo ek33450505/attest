@@ -41,11 +41,6 @@ from attest import enforce as enforce_mod
 # Internal helpers
 # ---------------------------------------------------------------------------
 
-def _print_report(label: str, message: str) -> None:
-    """Print a structured attest report line to stdout."""
-    print(f'attest: {label}: {message}', flush=True)
-
-
 def _emit_block(reason: str) -> None:
     """Emit the SubagentStop block decision as the SOLE stdout content.
 

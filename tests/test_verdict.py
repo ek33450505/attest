@@ -241,6 +241,32 @@ class TestReasonString(unittest.TestCase):
         # or match; both are acceptable depending on evaluation order.
         self.assertIsInstance(v['reason'], str)
 
+    def test_reason_status_none_claimed_but_unchanged_not_catch_all(self) -> None:
+        """Fix: status=None + files claimed but absent → reason must mention the file,
+        NOT fall through to 'Claim matches observed delta' (verdict.py bug fix)."""
+        c = _claim(status=None, files_changed=['a.py'], source='nl')
+        o = _observed(changed=set())
+        v = evaluate(c, o)
+        # false_done must NOT be set (status is None, not DONE)
+        self.assertFalse(v['false_done'])
+        # claimed_but_unchanged must contain a.py
+        self.assertIn('a.py', v['claimed_but_unchanged'])
+        # Reason must NOT be the generic catch-all
+        self.assertNotEqual(v['reason'], 'Claim matches observed delta',
+                            "reason must mention the missing file, not the catch-all")
+        # Reason must mention the claimed file
+        self.assertIn('a.py', v['reason'])
+
+    def test_reason_status_none_renders_safely(self) -> None:
+        """status=None is rendered as '(none)' in the reason string, not as 'None'."""
+        c = _claim(status=None, files_changed=['b.py'], source='nl')
+        o = _observed(changed=set())
+        v = evaluate(c, o)
+        # Should NOT contain the Python repr 'None' (capital N)
+        self.assertNotIn('None', v['reason'])
+        # Should contain the safe placeholder
+        self.assertIn('(none)', v['reason'])
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -479,6 +479,69 @@ class TestNLSeparatorProseSafety(unittest.TestCase):
                                  f"Expected no files for: {text!r}")
 
 
+class TestCodeFenceBlindspot(unittest.TestCase):
+    """Fix: code-fence lines inside ``` or ~~~ must NOT be parsed as claims (I1/I4)."""
+
+    def test_status_inside_backtick_fence_yields_source_none(self) -> None:
+        """Status: and files_changed: ONLY inside a ``` fence → source='none', no claim."""
+        text = (
+            "Here is an example block:\n"
+            "```\n"
+            "Status: DONE\n"
+            "files_changed: phantom.py\n"
+            "```\n"
+            "That is what the output looks like.\n"
+        )
+        result = parse_claim(text)
+        self.assertIsNone(result['status'],
+                          "Status: inside a fence must not produce a parsed status")
+        self.assertEqual(result['files_changed'], [],
+                         "files_changed: inside a fence must not produce claimed files")
+        self.assertEqual(result['source'], 'none',
+                         "No real claim outside the fence → source='none'")
+
+    def test_status_inside_tilde_fence_yields_source_none(self) -> None:
+        """Status: inside a ~~~ fence must not be parsed."""
+        text = (
+            "~~~\n"
+            "Status: DONE\n"
+            "files_changed: ghost.py\n"
+            "~~~\n"
+        )
+        result = parse_claim(text)
+        self.assertIsNone(result['status'])
+        self.assertEqual(result['files_changed'], [])
+        self.assertEqual(result['source'], 'none')
+
+    def test_real_status_after_fence_is_detected(self) -> None:
+        """A Status: outside the fence (after closing ```) IS detected normally."""
+        text = (
+            "```\n"
+            "Status: DONE\n"
+            "files_changed: phantom.py\n"
+            "```\n"
+            "\n"
+            "Status: DONE\n"
+            "files_changed: real.py\n"
+        )
+        result = parse_claim(text)
+        self.assertEqual(result['status'], 'DONE')
+        self.assertIn('real.py', result['files_changed'])
+        self.assertNotIn('phantom.py', result['files_changed'])
+
+    def test_indented_fence_still_tracked(self) -> None:
+        """An indented ``` fence line is still recognized as a fence boundary."""
+        text = (
+            "  ```\n"
+            "  Status: DONE\n"
+            "  files_changed: secret.py\n"
+            "  ```\n"
+        )
+        result = parse_claim(text)
+        self.assertIsNone(result['status'])
+        self.assertEqual(result['files_changed'], [])
+
+
 class TestMissingEmptyClaim(unittest.TestCase):
     """CRITICAL RULE: missing/unparseable claim → status=None, source='none'."""
 

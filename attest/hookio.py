@@ -122,9 +122,10 @@ def parse_payload(raw: str) -> dict:
 
     cwd: str = data.get('cwd') or ''
 
-    # stop_hook_active: guard against blocking loops (Phase 2+); detect early
+    # stop_hook_active: guard against blocking loops (Phase 2+); detect early.
+    # Accept ONLY a real JSON boolean true — a string "false" must not be truthy.
     stop_hook_active_raw = data.get('stop_hook_active')
-    stop_hook_active: bool = bool(stop_hook_active_raw) if stop_hook_active_raw is not None else False
+    stop_hook_active: bool = (stop_hook_active_raw is True)
 
     # payload_text: best-effort extraction of the agent's output text
     # Priority: agent_response.content[].text > last_assistant_message > output > body

@@ -147,9 +147,9 @@ def _build_reason(
         verb = 'was' if n == 1 else 'were'
         return f'Claimed DONE but {preview}{suffix} {verb} never modified'
 
-    if claimed_but_unchanged and status:
+    if claimed_but_unchanged:
         preview = ', '.join(claimed_but_unchanged[:3])
-        return f'Claimed {status} but {preview} not in observed delta'
+        return f'Claimed {status or "(none)"} but {preview} not in observed delta'
 
     if observed_but_unclaimed:
         n = len(observed_but_unclaimed)
