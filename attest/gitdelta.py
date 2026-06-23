@@ -129,6 +129,10 @@ def _sha256_file(path: str) -> str:
         max_bytes = int(os.environ.get('ATTEST_MAX_HASH_BYTES', _MAX_HASH_BYTES))
     except (ValueError, TypeError):
         max_bytes = _MAX_HASH_BYTES
+    # Clamp negatives: int('-1') succeeds but makes st.st_size > max_bytes
+    # always True, silently degrading every file to metadata fingerprinting.
+    if max_bytes < 0:
+        max_bytes = _MAX_HASH_BYTES
     try:
         st = os.stat(path)
         if st.st_size > max_bytes:
@@ -189,32 +193,34 @@ def _parse_porcelain_v1_z(output: bytes) -> list:
 # Public API
 # ---------------------------------------------------------------------------
 
-def snapshot(repo_dir: str) -> dict:
-    """Snapshot the git working-tree state.
+def _snapshot_with_root(repo_dir: str) -> tuple:
+    """Internal helper: snapshot the working tree and return (result_dict, root).
 
-    Captures all files that differ from HEAD (modified, added, untracked,
-    deleted) and hashes their current content with SHA-256.
-
-    Args:
-        repo_dir: path to or inside a git repository.
+    Resolves the repo root once via ``_get_repo_root`` (1 subprocess) and runs
+    ``git status`` once (1 subprocess), for a total of 2 git calls.  The resolved
+    root is returned alongside the hash dict so ``delta()`` can include it in its
+    own return value without making a redundant third ``rev-parse`` call.
 
     Returns:
-        A dict mapping repo-relative paths to SHA-256 hex digests.
-        Deleted files map to _DELETED_SENTINEL.
-        On any error, returns ``{"_error": "<message>"}`` instead of raising.
+        ``(result_dict, root)`` where ``root`` is the absolute git toplevel.
+        On any error, returns ``({'_error': '<message>'}, None)`` — root is None
+        so callers can detect the error path without inspecting the dict.
+
+    The public ``snapshot()`` is a thin wrapper that discards ``root`` to keep
+    the public API unchanged.  ``delta()`` consumes both fields.
     """
     try:
         root = _get_repo_root(repo_dir)
     except NotAGitRepo as exc:
-        return {'_error': str(exc)}
+        return {'_error': str(exc)}, None
     except Exception as exc:  # noqa: BLE001
-        return {'_error': f'Failed to resolve repo root: {exc}'}
+        return {'_error': f'Failed to resolve repo root: {exc}'}, None
 
     try:
         stdout, stderr, rc = _run_git(['status', '--porcelain=v1', '-z'], cwd=root)
         if rc != 0:
             err = stderr.decode('utf-8', errors='replace').strip()
-            return {'_error': f'git status failed (rc={rc}): {err}'}
+            return {'_error': f'git status failed (rc={rc}): {err}'}, None
 
         paths = _parse_porcelain_v1_z(stdout)
 
@@ -235,10 +241,28 @@ def snapshot(repo_dir: str) -> dict:
             else:
                 result[relpath] = _DELETED_SENTINEL
 
-        return result
+        return result, root
 
     except Exception as exc:  # noqa: BLE001
-        return {'_error': f'Snapshot failed: {exc}'}
+        return {'_error': f'Snapshot failed: {exc}'}, None
+
+
+def snapshot(repo_dir: str) -> dict:
+    """Snapshot the git working-tree state.
+
+    Captures all files that differ from HEAD (modified, added, untracked,
+    deleted) and hashes their current content with SHA-256.
+
+    Args:
+        repo_dir: path to or inside a git repository.
+
+    Returns:
+        A dict mapping repo-relative paths to SHA-256 hex digests.
+        Deleted files map to _DELETED_SENTINEL.
+        On any error, returns ``{"_error": "<message>"}`` instead of raising.
+    """
+    result, _root = _snapshot_with_root(repo_dir)
+    return result
 
 
 def delta(before: dict, repo_dir: str) -> dict:
@@ -279,11 +303,15 @@ def delta(before: dict, repo_dir: str) -> dict:
         and len(before) > 0
     )
 
-    after = snapshot(repo_dir)
+    # _snapshot_with_root resolves the repo root via a single rev-parse and runs
+    # git status — 2 subprocesses total per delta() call.  The root is threaded
+    # back here so hook.py can skip its own repo_root() call (no 3rd rev-parse).
+    after, root = _snapshot_with_root(repo_dir)
 
     if '_error' in after:
         # Cannot determine what changed; empty set, and explicitly UNRELIABLE so
         # enforcement fails open instead of mistaking this for "changed nothing".
+        # root is absent on error paths so hook.py's fallback to repo_root() applies.
         return {'changed': set(), 'ambiguous': before_has_changes, 'reliable': False}
 
     changed: set = set()
@@ -299,4 +327,9 @@ def delta(before: dict, repo_dir: str) -> dict:
         if path != '_error' and path not in after:
             changed.add(path)
 
-    return {'changed': changed, 'ambiguous': before_has_changes, 'reliable': True}
+    return {
+        'changed': changed,
+        'ambiguous': before_has_changes,
+        'reliable': True,
+        'root': root,  # resolved by _snapshot_with_root; no extra subprocess needed
+    }

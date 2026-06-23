@@ -29,6 +29,18 @@ from typing import Optional
 
 
 # ---------------------------------------------------------------------------
+# Module-level schema-init guards (keyed by resolved db path)
+# ---------------------------------------------------------------------------
+# WAL mode, DDL, and chmod persist on the db file/dir once set, so repeating
+# them on every connection wastes 8–24 sqlite ops per SubagentStop invocation.
+# We re-initialize whenever the resolved path changes (e.g. a different
+# ATTEST_STATE_DB in tests) so tests with isolated tmpdir DBs always get a
+# fresh schema pass without needing to reload the module.
+_schema_initialized_path: Optional[str] = None
+_cast_db_initialized_path: Optional[str] = None
+
+
+# ---------------------------------------------------------------------------
 # DB path resolution
 # ---------------------------------------------------------------------------
 
@@ -46,57 +58,75 @@ def _open_db() -> sqlite3.Connection:
     (e.g. on a read-only or foreign-owned filesystem) degrades to a no-op and
     NEVER raises out of this function.  The WAL sidecars (-wal/-shm) are
     protected implicitly by the 0o700 directory.
+
+    Performance: WAL mode, DDL, and chmod persist on the db file after first
+    initialization.  The module-level ``_schema_initialized_path`` flag skips
+    the 8–24 repeated sqlite ops on every subsequent call within the same
+    process.  The guard is keyed by resolved path so tests that point
+    ATTEST_STATE_DB at a fresh tmpdir always get a proper schema pass.
     """
+    global _schema_initialized_path
     path = _db_path()
     dirname = os.path.dirname(path)
+    # makedirs is always run — it is idempotent and sqlite3.connect() requires
+    # the directory to exist regardless of whether schema init is needed.
     try:
         os.makedirs(dirname, exist_ok=True)
     except OSError:
         pass
-    # Harden the directory — also fixes pre-existing dirs that makedirs skips
-    # when exist_ok=True (e.g. ~/.attest already existed world-readable).
-    try:
-        os.chmod(dirname, 0o700)
-    except OSError:
-        pass
+
+    need_init = (_schema_initialized_path != path)
+
+    if need_init:
+        # Harden the directory — also fixes pre-existing dirs that makedirs skips
+        # when exist_ok=True (e.g. ~/.attest already existed world-readable).
+        try:
+            os.chmod(dirname, 0o700)
+        except OSError:
+            pass
+
     conn = sqlite3.connect(path, timeout=5)
-    # Harden the DB file itself (WAL sidecars inherit directory protection).
-    try:
-        os.chmod(path, 0o600)
-    except OSError:
-        pass
-    conn.execute('PRAGMA journal_mode=WAL')
-    conn.execute('''
-        CREATE TABLE IF NOT EXISTS snapshots (
-            agent_key   TEXT PRIMARY KEY,
-            snapshot    TEXT NOT NULL,
-            repo        TEXT NOT NULL DEFAULT '',
-            session_id  TEXT NOT NULL DEFAULT '',
-            meta        TEXT NOT NULL DEFAULT '{}',
-            block_count INTEGER NOT NULL DEFAULT 0,
-            saved_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
-        )
-    ''')
-    # Idempotent migration for pre-Phase-2 DBs created without block_count.
-    # Without this, a SELECT/UPDATE of block_count on an old DB raises
-    # OperationalError, which (swallowed) would read back as 0 forever — the
-    # classic "counter never increments -> infinite block" failure. See python.md.
-    try:
-        conn.execute('ALTER TABLE snapshots ADD COLUMN block_count INTEGER NOT NULL DEFAULT 0')
-    except sqlite3.OperationalError:
-        pass  # column already exists
-    # Session-scoped backstop counter (independent of agent_key stability). Keyed on
-    # the confirmed-real (session_id, repo); bounds any runaway even if agent_id churns.
-    conn.execute('''
-        CREATE TABLE IF NOT EXISTS session_blocks (
-            session_id  TEXT NOT NULL,
-            repo        TEXT NOT NULL,
-            n           INTEGER NOT NULL DEFAULT 0,
-            updated_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
-            PRIMARY KEY (session_id, repo)
-        )
-    ''')
-    conn.commit()
+
+    if need_init:
+        # Harden the DB file itself (WAL sidecars inherit directory protection).
+        try:
+            os.chmod(path, 0o600)
+        except OSError:
+            pass
+        conn.execute('PRAGMA journal_mode=WAL')
+        conn.execute('''
+            CREATE TABLE IF NOT EXISTS snapshots (
+                agent_key   TEXT PRIMARY KEY,
+                snapshot    TEXT NOT NULL,
+                repo        TEXT NOT NULL DEFAULT '',
+                session_id  TEXT NOT NULL DEFAULT '',
+                meta        TEXT NOT NULL DEFAULT '{}',
+                block_count INTEGER NOT NULL DEFAULT 0,
+                saved_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+            )
+        ''')
+        # Idempotent migration for pre-Phase-2 DBs created without block_count.
+        # Without this, a SELECT/UPDATE of block_count on an old DB raises
+        # OperationalError, which (swallowed) would read back as 0 forever — the
+        # classic "counter never increments -> infinite block" failure. See python.md.
+        try:
+            conn.execute('ALTER TABLE snapshots ADD COLUMN block_count INTEGER NOT NULL DEFAULT 0')
+        except sqlite3.OperationalError:
+            pass  # column already exists
+        # Session-scoped backstop counter (independent of agent_key stability). Keyed on
+        # the confirmed-real (session_id, repo); bounds any runaway even if agent_id churns.
+        conn.execute('''
+            CREATE TABLE IF NOT EXISTS session_blocks (
+                session_id  TEXT NOT NULL,
+                repo        TEXT NOT NULL,
+                n           INTEGER NOT NULL DEFAULT 0,
+                updated_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+                PRIMARY KEY (session_id, repo)
+            )
+        ''')
+        conn.commit()
+        _schema_initialized_path = path
+
     return conn
 
 
@@ -342,11 +372,14 @@ def mirror_to_cast_db(record: dict) -> None:
     """Best-effort write to the CAST cast.db attestations table.
 
     Silently no-ops if cast_db is not importable or cast.db does not exist.
-    The ``attestations`` table is created if not present (idempotent).
+    The ``attestations`` table is created if not present — but only ONCE per
+    process per resolved cast.db path (``_cast_db_initialized_path`` guard)
+    to avoid repeating the CREATE TABLE on every SubagentStop invocation.
 
     Args:
         record: arbitrary dict to store as JSON in the ``payload`` column.
     """
+    global _cast_db_initialized_path
     conn = None
     try:
         cast_db_path = os.path.expanduser(
@@ -356,15 +389,18 @@ def mirror_to_cast_db(record: dict) -> None:
             return
 
         conn = sqlite3.connect(cast_db_path, timeout=3)
-        conn.execute('''
-            CREATE TABLE IF NOT EXISTS attestations (
-                id          INTEGER PRIMARY KEY AUTOINCREMENT,
-                agent_key   TEXT,
-                false_done  INTEGER DEFAULT 0,
-                payload     TEXT,
-                created_at  TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
-            )
-        ''')
+        if _cast_db_initialized_path != cast_db_path:
+            conn.execute('''
+                CREATE TABLE IF NOT EXISTS attestations (
+                    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                    agent_key   TEXT,
+                    false_done  INTEGER DEFAULT 0,
+                    payload     TEXT,
+                    created_at  TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+                )
+            ''')
+            conn.commit()
+            _cast_db_initialized_path = cast_db_path
         conn.execute(
             'INSERT INTO attestations (agent_key, false_done, payload) VALUES (?, ?, ?)',
             (

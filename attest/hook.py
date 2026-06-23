@@ -237,7 +237,10 @@ def on_stop(payload_dict: dict, *, raw: Optional[str] = None) -> None:
 
     # Resolve the git toplevel so claimed/observed paths normalize against the same
     # root (handles /tmp vs /private/tmp); fall back to cwd if unresolved.
-    root = gitdelta.repo_root(cwd) or cwd
+    # delta() already resolved root via snapshot(); consume it from the observed
+    # dict to avoid a redundant subprocess call.  Fall back to repo_root(cwd) if
+    # the key is absent (error-path dicts from delta() don't include 'root').
+    root = observed.get('root') or gitdelta.repo_root(cwd) or cwd
 
     verdict = verdict_mod.evaluate(parsed, observed, repo_root=root)
 

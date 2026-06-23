@@ -34,8 +34,10 @@
 set +e
 
 # ── Error logging ─────────────────────────────────────────────────────────────
-mkdir -p "${HOME}/.claude/logs" 2>/dev/null || true
+# mkdir is deferred into _log_error so the fork-and-mkdir overhead is skipped
+# on every clean (non-error) invocation — only pay the cost when we need to log.
 _log_error() {
+  mkdir -p "${HOME}/.claude/logs" 2>/dev/null || true
   echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] ERROR attest-subagent-stop.sh: $1" \
     >> "${HOME}/.claude/logs/attest-errors.log" 2>/dev/null || true
 }
