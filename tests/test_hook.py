@@ -676,11 +676,14 @@ class TestHookEnforce(unittest.TestCase):
         aid = 'enforce-retry-1'
         self._start(_make_payload(aid, 's1', self.repo))
         out1, _ = self._stop(self._false_claim_payload(aid, 's1'))
-        out2, _ = self._stop(self._false_claim_payload(aid, 's1'))
+        out2, err2 = self._stop(self._false_claim_payload(aid, 's1'))
         # First stop blocks (JSON), second stop fails open (empty stdout), then cleared.
         self.assertIn('"decision"', out1)
         self.assertEqual(out2.strip(), '')
         self.assertIsNone(self.state.load_snapshot(aid))
+        # Observability: second stop should emit stderr diagnostic explaining why not blocked
+        self.assertIn('detected false DONE but NOT blocking', err2)
+        self.assertIn('ALLOW_RETRY_CAP', err2)
 
     def test_truthful_claim_no_block(self) -> None:
         aid = 'enforce-truth-1'
@@ -805,10 +808,13 @@ class TestHookEnforce(unittest.TestCase):
         self._start(_make_payload(aid, 's1', self.repo))
         payload = self._false_claim_payload(aid, 's1')
         payload['stop_hook_active'] = True
-        stdout, _ = self._stop(payload)
+        stdout, stderr = self._stop(payload)
         self.assertEqual(stdout.strip(), '')
         # Counter must NOT have incremented (no block attempted).
         self.assertEqual(self.state.get_block_count(aid), 0)
+        # Observability: stderr should explain why not blocked despite detecting false DONE
+        self.assertIn('detected false DONE but NOT blocking', stderr)
+        self.assertIn('ALLOW_STOP_HOOK_ACTIVE', stderr)
 
     def test_internal_exception_fails_open(self) -> None:
         """An exception inside the decision path must not leave a block on stdout."""
@@ -834,3 +840,46 @@ class TestHookEnforce(unittest.TestCase):
             self.assertNotIn('"decision"', stdout)
         finally:
             os.environ['ATTEST_ENFORCE'] = '1'  # restored for tearDown symmetry
+
+    def test_done_with_concerns_enforce_no_block(self) -> None:
+        """DONE_WITH_CONCERNS status never blocks, even with claimed-but-absent file.
+
+        Unlike DONE, DONE_WITH_CONCERNS is never a false claim — it's an
+        intentional claim of incomplete work. Enforcement must never block it.
+        """
+        aid = 'enforce-concerns-1'
+        self._start(_make_payload(aid, 's1', self.repo))
+        # Claim a ghost file AND report DONE_WITH_CONCERNS (NOT DONE)
+        payload = _make_payload(
+            aid, 's1', self.repo,
+            payload_text=(
+                '## Handoff\n'
+                'files_changed: src/ghost.py\n'
+                'status: DONE_WITH_CONCERNS\n'
+                'blockers: something not finished\n'
+            )
+        )
+        stdout, _ = self._stop(payload)
+        # DONE_WITH_CONCERNS must never block, even with a phantom file
+        self.assertEqual(stdout.strip(), '')
+
+    def test_counter_persist_fail_open(self) -> None:
+        """If block counter increment fails, fail OPEN (no block emitted).
+
+        This is the primary loop-prevention valve: an unrecorded block is what
+        loops, so a failed counter commit must NOT emit a block.
+        """
+        aid = 'enforce-counter-fail-1'
+        self._start(_make_payload(aid, 's1', self.repo))
+        # Patch increment_block_count to simulate a persistence failure
+        payload = self._false_claim_payload(aid, 's1')
+        so, se = io.StringIO(), io.StringIO()
+        with patch.object(self.state, 'increment_block_count', return_value=None), \
+             patch('sys.stdout', so), patch('sys.stderr', se):
+            self.hook.on_stop(payload)
+        stdout, stderr = so.getvalue(), se.getvalue()
+        # No block JSON on stdout (failing open)
+        self.assertEqual(stdout.strip(), '')
+        # Stderr should explain the failure
+        self.assertIn('counter persist failed', stderr)
+        self.assertIn('failing open', stderr)

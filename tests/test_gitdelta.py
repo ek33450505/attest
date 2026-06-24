@@ -453,6 +453,21 @@ class TestSha256FileHashCap(unittest.TestCase):
         result = _sha256_file(p)  # must not raise
         self.assertRegex(result, r'^[0-9a-f]{64}$')
 
+    def test_negative_env_value_clamped_to_default(self) -> None:
+        """A negative ATTEST_MAX_HASH_BYTES must be clamped to the default.
+
+        int('-1') succeeds but makes st.st_size > max_bytes always True,
+        silently degrading every file to metadata fingerprinting.
+        The guard must clamp negatives to the default, so small files
+        still return full SHA-256 content hashes.
+        """
+        os.environ['ATTEST_MAX_HASH_BYTES'] = '-1'
+        p = self._write('small_negative.py', b'x = 1\n')
+        result = _sha256_file(p)  # must not raise
+        # Small file must return full SHA-256 hex, not metadata fingerprint
+        self.assertRegex(result, r'^[0-9a-f]{64}$')
+        self.assertFalse(result.startswith('meta:'), f'Negative clamp failed, got meta: fingerprint: {result!r}')
+
     def test_large_file_meta_format_has_partial_hash(self) -> None:
         """Large-file fingerprint now includes a partial content hash as 4th component.
 

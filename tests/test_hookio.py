@@ -154,13 +154,19 @@ class TestParsePayload(unittest.TestCase):
         self.assertEqual(result['payload_text'], '')
 
     def test_none_returns_defaults(self) -> None:
-        # None is not a valid str but should not crash
-        try:
-            result = self.parse_payload(None)  # type: ignore[arg-type]
-            self.assertEqual(result['agent_type'], 'unknown')
-        except (TypeError, AttributeError):
-            # Acceptable — parse_payload signature is str
-            pass
+        """parse_payload(None) must NOT raise; returns safe defaults per contract."""
+        # The docstring contract says: "Never raises; returns safe defaults on parse error."
+        # This test enforces that contract — no exception handling allowed.
+        result = self.parse_payload(None)  # type: ignore[arg-type]
+        self.assertEqual(result['agent_type'], 'unknown')
+        self.assertEqual(result['agent_id'], '')
+        self.assertEqual(result['payload_text'], '')
+        # All expected keys must be present
+        expected_keys = {
+            'agent_id', 'agent_type', 'session_id', 'stop_reason',
+            'transcript_path', 'agent_transcript_path', 'cwd', 'stop_hook_active', 'payload_text',
+        }
+        self.assertEqual(set(result.keys()), expected_keys)
 
     def test_invalid_json_returns_defaults(self) -> None:
         result = self.parse_payload('{not valid json}')

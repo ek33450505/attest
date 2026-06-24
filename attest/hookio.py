@@ -77,7 +77,11 @@ def parse_payload(raw: str) -> dict:
         'payload_text': '',
     }
 
-    if not raw or not raw.strip():
+    try:
+        if not raw or not raw.strip():
+            return _empty.copy()
+    except (TypeError, AttributeError):
+        # raw is None or some other type that doesn't have .strip()
         return _empty.copy()
 
     try:
