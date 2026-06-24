@@ -53,7 +53,7 @@ body:
     attributes:
       label: attest version
       description: Output of `attest --version`.
-      placeholder: "attest 0.1.0"
+      placeholder: "attest 0.2.0"
     validations:
       required: true
 
