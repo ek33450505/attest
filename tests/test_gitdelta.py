@@ -23,7 +23,7 @@ import unittest
 
 from attest.gitdelta import (
     snapshot, delta, NotAGitRepo, _DELETED_SENTINEL, repo_root, path_on_disk,
-    _sha256_file, _MAX_HASH_BYTES,
+    _sha256_file, _MAX_HASH_BYTES, _partial_content_hash,
 )
 
 
@@ -386,8 +386,12 @@ class TestSha256FileHashCap(unittest.TestCase):
         # sha256 hex is exactly 64 lowercase hex chars — meta prefix breaks this.
         self.assertNotRegex(result, r'^[0-9a-f]{64}$')
 
-    def test_large_file_content_not_read(self) -> None:
-        """Content of a large file is NOT read (builtin open is never called for it)."""
+    def test_large_file_not_read_via_builtins_open(self) -> None:
+        """Large files are never opened via builtins.open.
+
+        Partial content is read via os.fdopen (not builtins.open) for large
+        files, and the full-content path is skipped entirely.
+        """
         from unittest.mock import patch
         p = self._write('big3.bin', b'z' * 200)
         with patch('builtins.open') as mock_open:
@@ -447,6 +451,102 @@ class TestSha256FileHashCap(unittest.TestCase):
         os.environ['ATTEST_MAX_HASH_BYTES'] = ''
         p = self._write('small_fallback2.py', b'y = 2\n')
         result = _sha256_file(p)  # must not raise
+        self.assertRegex(result, r'^[0-9a-f]{64}$')
+
+    def test_negative_env_value_clamped_to_default(self) -> None:
+        """A negative ATTEST_MAX_HASH_BYTES must be clamped to the default.
+
+        int('-1') succeeds but makes st.st_size > max_bytes always True,
+        silently degrading every file to metadata fingerprinting.
+        The guard must clamp negatives to the default, so small files
+        still return full SHA-256 content hashes.
+        """
+        os.environ['ATTEST_MAX_HASH_BYTES'] = '-1'
+        p = self._write('small_negative.py', b'x = 1\n')
+        result = _sha256_file(p)  # must not raise
+        # Small file must return full SHA-256 hex, not metadata fingerprint
+        self.assertRegex(result, r'^[0-9a-f]{64}$')
+        self.assertFalse(result.startswith('meta:'), f'Negative clamp failed, got meta: fingerprint: {result!r}')
+
+    def test_large_file_meta_format_has_partial_hash(self) -> None:
+        """Large-file fingerprint now includes a partial content hash as 4th component.
+
+        Format: meta:<size>:<mtime_ns>:<16-char hex> (4 colon-separated parts).
+        """
+        p = self._write('big_format.bin', b'x' * 200)
+        result = _sha256_file(p)
+        self.assertTrue(result.startswith('meta:'), f'Expected meta: prefix, got {result!r}')
+        parts = result.split(':')
+        self.assertEqual(len(parts), 4, f'Expected 4 parts in meta fingerprint, got: {result!r}')
+        # 4th part is a 16-char lowercase hex string (sha256 truncated to 8 bytes)
+        self.assertRegex(parts[3], r'^[0-9a-f]{16}$', f'Bad partial hash: {parts[3]!r}')
+
+    def test_large_file_content_spoof_detected(self) -> None:
+        """A content change that preserves size and mtime is detected via partial hash.
+
+        The old meta:<size>:<mtime_ns> format would miss this; the new partial-hash
+        component catches it.
+        """
+        content_a = b'a' * 200
+        content_b = b'b' * 200  # same size, different content
+        p = self._write('spoof.bin', content_a)
+        fp1 = _sha256_file(p)
+        # Overwrite with same-size different content, then restore mtime exactly.
+        st = os.stat(p)
+        self._write('spoof.bin', content_b)  # overwrites p
+        os.utime(p, ns=(st.st_atime_ns, st.st_mtime_ns))
+        fp2 = _sha256_file(p)
+        self.assertNotEqual(fp1, fp2, 'Partial hash should detect content change at same size+mtime')
+
+
+class TestSha256FileSymlink(unittest.TestCase):
+    """Fix #2: symlink entries return a link: fingerprint; never follow to target."""
+
+    def setUp(self) -> None:
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.dir = self._tmpdir.name
+        # Use a tiny threshold so most files are "small" (content-hashed).
+        os.environ['ATTEST_MAX_HASH_BYTES'] = '100'
+
+    def tearDown(self) -> None:
+        os.environ.pop('ATTEST_MAX_HASH_BYTES', None)
+        self._tmpdir.cleanup()
+
+    def test_symlink_returns_link_prefix(self) -> None:
+        """A symlink target returns a 'link:' fingerprint, not a sha256."""
+        target = os.path.join(self.dir, 'real.txt')
+        link = os.path.join(self.dir, 'link.txt')
+        with open(target, 'w') as fh:
+            fh.write('content\n')
+        os.symlink(target, link)
+        result = _sha256_file(link)
+        self.assertTrue(result.startswith('link:'), f'Expected link: prefix, got {result!r}')
+        self.assertNotRegex(result, r'^[0-9a-f]{64}$')
+
+    def test_symlink_fingerprint_not_hex64(self) -> None:
+        """Symlink fingerprint is never confused with a real sha256 digest."""
+        target = os.path.join(self.dir, 'real2.txt')
+        link = os.path.join(self.dir, 'link2.txt')
+        with open(target, 'w') as fh:
+            fh.write('x\n')
+        os.symlink(target, link)
+        result = _sha256_file(link)
+        self.assertNotRegex(result, r'^[0-9a-f]{64}$')
+
+    def test_symlink_to_missing_target_does_not_raise(self) -> None:
+        """A dangling symlink returns a 'link:' fingerprint without raising."""
+        link = os.path.join(self.dir, 'dangling.txt')
+        os.symlink('/nonexistent/path/that/does/not/exist', link)
+        result = _sha256_file(link)
+        # Dangling symlinks have lstat size = length of the target path string.
+        self.assertTrue(result.startswith('link:'), f'Expected link: prefix, got {result!r}')
+
+    def test_regular_file_still_hashed(self) -> None:
+        """A regular file (non-symlink) below the threshold still returns sha256."""
+        p = os.path.join(self.dir, 'regular.py')
+        with open(p, 'w') as fh:
+            fh.write('x = 1\n')
+        result = _sha256_file(p)
         self.assertRegex(result, r'^[0-9a-f]{64}$')
 
 

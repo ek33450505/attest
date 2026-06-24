@@ -281,6 +281,29 @@ make_stop_payload() {
   [ -z "$output" ]                      # second stop fails open (retry cap)
 }
 
+@test "regression: start+stop work when .claude/logs does not pre-exist" {
+  # Explicitly assert the log dir is absent (temp HOME from setup_temp_home never
+  # creates it). This directly guards the mkdir-before-redirect regression where
+  # deferring mkdir into _log_error caused bash to skip the python command entirely.
+  [ ! -d "${HOME}/.claude/logs" ]
+  local agent_id="bats-no-logdir"
+  local session_id="sess-no-logdir"
+
+  run bash "$START_HOOK" <<< "$(make_start_payload "$agent_id" "$session_id" "$TEST_REPO")"
+  [ "$status" -eq 0 ]
+
+  # Stop with a false claim — MISMATCH proves start successfully saved a snapshot
+  # (if the log dir was missing and start skipped saving, stop would see no snapshot).
+  local stop_payload
+  stop_payload="$(printf '{"agent_type":"code-writer","agent_id":"%s","session_id":"%s","cwd":"%s","stop_reason":"end_turn","transcript_path":"","stop_hook_active":false,"last_assistant_message":"%s"}' \
+    "$agent_id" "$session_id" "$TEST_REPO" \
+    "$(printf '## Handoff\nfiles_changed: src/ghost.py\nstatus: DONE\nblockers: none\n' | python3 -c 'import sys,json; print(json.dumps(sys.stdin.read())[1:-1])')" \
+  )"
+  run bash "$STOP_HOOK" <<< "$stop_payload"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"MISMATCH"* ]]
+}
+
 @test "hooks use transcript_path when payload_text absent" {
   local agent_id="bats-transcript"
   local session_id="sess-transcript"

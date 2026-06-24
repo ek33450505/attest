@@ -231,6 +231,52 @@ class TestVerifyCommand(unittest.TestCase):
         self.assertIsInstance(data.get('observed_but_unclaimed', []), list)
 
 
+class TestVerifyUnreliableDelta(unittest.TestCase):
+    """Fix: verify with a before-snapshot that carries _error → unreliable → exit 1."""
+
+    def setUp(self) -> None:
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.workdir = self._tmpdir.name
+
+    def tearDown(self) -> None:
+        self._tmpdir.cleanup()
+
+    def _before_json(self, snap: dict) -> str:
+        p = os.path.join(self.workdir, 'before.json')
+        with open(p, 'w') as fh:
+            json.dump(snap, fh)
+        return p
+
+    def _claim_file(self, text: str) -> str:
+        p = os.path.join(self.workdir, 'claim.md')
+        with open(p, 'w') as fh:
+            fh.write(text)
+        return p
+
+    def test_verify_non_git_repo_exits_1_with_error(self) -> None:
+        """Fix: delta(reliable=False) on non-git dir → exit 1 + error message.
+
+        Previously the NotAGitRepo except was unreachable; the reliable=False
+        path was never handled, causing silent incorrect output.
+        """
+        with tempfile.TemporaryDirectory() as non_git:
+            before_path = self._before_json({})
+            claim_path = self._claim_file('Status: DONE\n')
+            with patch('sys.stderr', new_callable=StringIO) as mock_err:
+                rc = main([
+                    'verify',
+                    '--claim-file', claim_path,
+                    '--before', before_path,
+                    '--repo', non_git,
+                ])
+            self.assertEqual(rc, 1)
+            err_text = mock_err.getvalue()
+            self.assertTrue(err_text, 'Expected an error message on stderr')
+            err_data = json.loads(err_text)
+            self.assertIn('error', err_data)
+            self.assertIn('unreliable', err_data['error'].lower())
+
+
 class TestMissingArgs(unittest.TestCase):
 
     def test_no_subcommand_exits_nonzero(self) -> None:

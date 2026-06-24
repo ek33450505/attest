@@ -33,9 +33,18 @@
 # Never fail loudly — a broken hook must not interrupt the parent session.
 set +e
 
-# ── Error logging ─────────────────────────────────────────────────────────────
+# ── Log directory ─────────────────────────────────────────────────────────────
+# MUST run unconditionally BEFORE the 2>>"$ATTEST_LOG" redirect below is opened.
+# If the directory does not exist when bash opens the redirect, the python command
+# is never executed (bash fails the redirect silently under set +e, skipping the
+# whole command). Deferring this mkdir into _log_error is NOT safe here.
 mkdir -p "${HOME}/.claude/logs" 2>/dev/null || true
+
+# ── Error logging ─────────────────────────────────────────────────────────────
 _log_error() {
+  # Belt-and-suspenders: the top-level mkdir above handles the common case, but
+  # keep this here so _log_error remains self-contained if called from other contexts.
+  mkdir -p "${HOME}/.claude/logs" 2>/dev/null || true
   echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] ERROR attest-subagent-stop.sh: $1" \
     >> "${HOME}/.claude/logs/attest-errors.log" 2>/dev/null || true
 }

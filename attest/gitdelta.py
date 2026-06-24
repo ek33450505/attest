@@ -19,19 +19,24 @@ Public API:
 """
 import hashlib
 import os
+import stat
 import subprocess
 from typing import Optional
 
 # Sentinel stored for deleted files in a snapshot.
 _DELETED_SENTINEL = '\x00DELETED\x00'
 
-# Files larger than this are fingerprinted by metadata (size + mtime_ns) rather
-# than content, so the synchronous stop-hook is never stalled by a large binary.
-# A real write changes size or mtime → fingerprint changes → change is still
-# detected.  A sha256 hex digest is always 64 lowercase hex chars with no colon,
-# so the "meta:" prefix guarantees zero collision with a real hash.
+# Files larger than this are fingerprinted by partial content + metadata rather
+# than a full content hash, so the synchronous stop-hook is never stalled by a
+# large binary.  The fingerprint includes a partial hash of the first+last 4 KB
+# so size+mtime-preserving content edits are still detected.
+# A sha256 hex digest is always 64 lowercase hex chars with no colon, so the
+# "meta:" prefix guarantees zero collision with a real hash.
 # Override at runtime via the ATTEST_MAX_HASH_BYTES environment variable.
 _MAX_HASH_BYTES = 10 * 1024 * 1024  # 10 MB default
+
+# Bytes read from the head and tail of large files for the partial content hash.
+_PARTIAL_HASH_CHUNK = 4096
 
 
 class NotAGitRepo(Exception):
@@ -108,38 +113,96 @@ def path_on_disk(root: str, path: str, cwd: str = '') -> bool:
     return False
 
 
+def _partial_content_hash(path: str, size: int) -> str:
+    """Return a 16-char hex digest of the first + last 4 KB of a file.
+
+    Opens the file with O_NOFOLLOW to guard against a TOCTOU race where the
+    file is swapped to a symlink between the caller's lstat and this open.
+    Returns '' on any error so callers can fall back to a plain metadata
+    fingerprint (fail-open by design).
+    """
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    except OSError:
+        return ''
+    try:
+        with os.fdopen(fd, 'rb') as fh:
+            head = fh.read(_PARTIAL_HASH_CHUNK)
+            tail = b''
+            if size > _PARTIAL_HASH_CHUNK:
+                # Seek to the start of the last chunk (but not before the
+                # current position, in case the file shrank since lstat).
+                fh.seek(max(fh.tell(), size - _PARTIAL_HASH_CHUNK))
+                tail = fh.read(_PARTIAL_HASH_CHUNK)
+    except (IOError, OSError):
+        return ''
+    h = hashlib.sha256()
+    h.update(head + tail)
+    return h.hexdigest()[:16]
+
+
 def _sha256_file(path: str) -> str:
-    """Return the SHA-256 hex digest of the file at path.
+    """Return a content fingerprint for the file at path.
 
-    For files whose size exceeds _MAX_HASH_BYTES (default 10 MB, overridable
-    via the ATTEST_MAX_HASH_BYTES env var), a metadata fingerprint is returned
-    instead of reading the file content:
+    For regular files whose size is at or below _MAX_HASH_BYTES (default 10 MB,
+    overridable via the ATTEST_MAX_HASH_BYTES env var), the full SHA-256 hex
+    digest is returned.
 
-        ``meta:<size>:<mtime_ns>``
+    For symlinks, a metadata fingerprint from lstat is returned rather than
+    following the target — this prevents a FIFO/device stall via a symlink TOCTOU:
 
-    Semantic safety: any real write changes at least one of size or mtime, so
-    the fingerprint changes → the change is still detected.  A sha256 hex digest
-    is exactly 64 lowercase hex chars with no colon, so the ``meta:`` prefix
-    guarantees no collision with a real hash and no false OK / false block.
+        ``link:<lstat_size>:<lstat_mtime_ns>``
 
-    Returns _DELETED_SENTINEL if the file cannot be read (deleted, permission
+    For large regular files (size > _MAX_HASH_BYTES), a partial-content
+    fingerprint is returned so the synchronous stop-hook is never stalled:
+
+        ``meta:<size>:<mtime_ns>:<sha256(first4k+last4k)[:16]>``
+
+    A sha256 hex digest is exactly 64 lowercase hex chars with no colon, so the
+    ``meta:`` and ``link:`` prefixes guarantee no collision with a real hash and
+    no false OK / false block.  On any read error when computing the partial hash,
+    the format falls back to ``meta:<size>:<mtime_ns>`` (still detects size/mtime
+    changes).
+
+    Returns _DELETED_SENTINEL if the file cannot be stat'd (deleted, permission
     denied, etc.).
     """
     try:
         max_bytes = int(os.environ.get('ATTEST_MAX_HASH_BYTES', _MAX_HASH_BYTES))
     except (ValueError, TypeError):
         max_bytes = _MAX_HASH_BYTES
+    # Clamp negatives: int('-1') succeeds but makes st.st_size > max_bytes
+    # always True, silently degrading every file to metadata fingerprinting.
+    if max_bytes < 0:
+        max_bytes = _MAX_HASH_BYTES
+
     try:
-        st = os.stat(path)
-        if st.st_size > max_bytes:
-            # Large file: skip content read; fingerprint on size + mtime_ns.
-            return f'meta:{st.st_size}:{st.st_mtime_ns}'
+        lst = os.lstat(path)
     except (IOError, OSError):
         return _DELETED_SENTINEL
 
+    # Symlink: return a lstat-based fingerprint; never follow to the target.
+    # A symlink that points to a FIFO or device could stall a blocking read.
+    if stat.S_ISLNK(lst.st_mode):
+        return f'link:{lst.st_size}:{lst.st_mtime_ns}'
+
+    # Large regular file: partial-content fingerprint (first+last 4 KB).
+    if lst.st_size > max_bytes:
+        partial = _partial_content_hash(path, lst.st_size)
+        if partial:
+            return f'meta:{lst.st_size}:{lst.st_mtime_ns}:{partial}'
+        # Fall back to plain metadata fingerprint on any read error (fail-open).
+        return f'meta:{lst.st_size}:{lst.st_mtime_ns}'
+
+    # Regular file: full SHA-256 with O_NOFOLLOW to prevent a TOCTOU race where
+    # the file is swapped to a symlink between lstat and open.
     h = hashlib.sha256()
     try:
-        with open(path, 'rb') as fh:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    except OSError:
+        return _DELETED_SENTINEL
+    try:
+        with os.fdopen(fd, 'rb') as fh:
             while True:
                 chunk = fh.read(65536)
                 if not chunk:
@@ -189,32 +252,34 @@ def _parse_porcelain_v1_z(output: bytes) -> list:
 # Public API
 # ---------------------------------------------------------------------------
 
-def snapshot(repo_dir: str) -> dict:
-    """Snapshot the git working-tree state.
+def _snapshot_with_root(repo_dir: str) -> tuple:
+    """Internal helper: snapshot the working tree and return (result_dict, root).
 
-    Captures all files that differ from HEAD (modified, added, untracked,
-    deleted) and hashes their current content with SHA-256.
-
-    Args:
-        repo_dir: path to or inside a git repository.
+    Resolves the repo root once via ``_get_repo_root`` (1 subprocess) and runs
+    ``git status`` once (1 subprocess), for a total of 2 git calls.  The resolved
+    root is returned alongside the hash dict so ``delta()`` can include it in its
+    own return value without making a redundant third ``rev-parse`` call.
 
     Returns:
-        A dict mapping repo-relative paths to SHA-256 hex digests.
-        Deleted files map to _DELETED_SENTINEL.
-        On any error, returns ``{"_error": "<message>"}`` instead of raising.
+        ``(result_dict, root)`` where ``root`` is the absolute git toplevel.
+        On any error, returns ``({'_error': '<message>'}, None)`` — root is None
+        so callers can detect the error path without inspecting the dict.
+
+    The public ``snapshot()`` is a thin wrapper that discards ``root`` to keep
+    the public API unchanged.  ``delta()`` consumes both fields.
     """
     try:
         root = _get_repo_root(repo_dir)
     except NotAGitRepo as exc:
-        return {'_error': str(exc)}
+        return {'_error': str(exc)}, None
     except Exception as exc:  # noqa: BLE001
-        return {'_error': f'Failed to resolve repo root: {exc}'}
+        return {'_error': f'Failed to resolve repo root: {exc}'}, None
 
     try:
         stdout, stderr, rc = _run_git(['status', '--porcelain=v1', '-z'], cwd=root)
         if rc != 0:
             err = stderr.decode('utf-8', errors='replace').strip()
-            return {'_error': f'git status failed (rc={rc}): {err}'}
+            return {'_error': f'git status failed (rc={rc}): {err}'}, None
 
         paths = _parse_porcelain_v1_z(stdout)
 
@@ -235,10 +300,28 @@ def snapshot(repo_dir: str) -> dict:
             else:
                 result[relpath] = _DELETED_SENTINEL
 
-        return result
+        return result, root
 
     except Exception as exc:  # noqa: BLE001
-        return {'_error': f'Snapshot failed: {exc}'}
+        return {'_error': f'Snapshot failed: {exc}'}, None
+
+
+def snapshot(repo_dir: str) -> dict:
+    """Snapshot the git working-tree state.
+
+    Captures all files that differ from HEAD (modified, added, untracked,
+    deleted) and hashes their current content with SHA-256.
+
+    Args:
+        repo_dir: path to or inside a git repository.
+
+    Returns:
+        A dict mapping repo-relative paths to SHA-256 hex digests.
+        Deleted files map to _DELETED_SENTINEL.
+        On any error, returns ``{"_error": "<message>"}`` instead of raising.
+    """
+    result, _root = _snapshot_with_root(repo_dir)
+    return result
 
 
 def delta(before: dict, repo_dir: str) -> dict:
@@ -279,11 +362,15 @@ def delta(before: dict, repo_dir: str) -> dict:
         and len(before) > 0
     )
 
-    after = snapshot(repo_dir)
+    # _snapshot_with_root resolves the repo root via a single rev-parse and runs
+    # git status — 2 subprocesses total per delta() call.  The root is threaded
+    # back here so hook.py can skip its own repo_root() call (no 3rd rev-parse).
+    after, root = _snapshot_with_root(repo_dir)
 
     if '_error' in after:
         # Cannot determine what changed; empty set, and explicitly UNRELIABLE so
         # enforcement fails open instead of mistaking this for "changed nothing".
+        # root is absent on error paths so hook.py's fallback to repo_root() applies.
         return {'changed': set(), 'ambiguous': before_has_changes, 'reliable': False}
 
     changed: set = set()
@@ -299,4 +386,9 @@ def delta(before: dict, repo_dir: str) -> dict:
         if path != '_error' and path not in after:
             changed.add(path)
 
-    return {'changed': changed, 'ambiguous': before_has_changes, 'reliable': True}
+    return {
+        'changed': changed,
+        'ambiguous': before_has_changes,
+        'reliable': True,
+        'root': root,  # resolved by _snapshot_with_root; no extra subprocess needed
+    }

@@ -246,6 +246,94 @@ class TestHookCaptureMode(unittest.TestCase):
                     pass
 
 
+class TestHookCaptureSecurity(unittest.TestCase):
+    """ATTEST_CAPTURE=1 security: agent_id sanitization + transcript_path bounds check."""
+
+    def setUp(self) -> None:
+        self.capture_dir = tempfile.mkdtemp()
+        self.tmpdir = tempfile.mkdtemp()
+        self.db_path = os.path.join(self.tmpdir, 'state.db')
+        os.environ['ATTEST_STATE_DB'] = self.db_path
+        os.environ['ATTEST_CAPTURE'] = '1'
+        # Redirect all capture output to our isolated temp dir.
+        os.environ['ATTEST_CAPTURE_DIR'] = self.capture_dir
+        from attest import hook
+        self.hook = hook
+
+    def tearDown(self) -> None:
+        import shutil as _shutil
+        os.environ.pop('ATTEST_STATE_DB', None)
+        os.environ.pop('ATTEST_CAPTURE', None)
+        os.environ.pop('ATTEST_CAPTURE_DIR', None)
+        _shutil.rmtree(self.capture_dir, ignore_errors=True)
+        _shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def test_agent_id_with_path_traversal_produces_sanitized_filename(self) -> None:
+        """An agent_id containing '../' is sanitized; the capture file stays inside capture_dir."""
+        payload = {
+            'agent_id': '../../../evil',  # path traversal attempt
+            'agent_type': 'code-writer',
+            'session_id': 'sess-sec1',
+            'transcript_path': '',
+            'cwd': self.tmpdir,
+            'stop_hook_active': False,
+            'payload_text': '',
+        }
+        self.hook._capture_if_requested('stop', payload, '')
+
+        # After sanitization, the agent_id becomes '____evil' (or similar all-safe chars).
+        # All written files must reside directly inside capture_dir.
+        files_written = os.listdir(self.capture_dir)
+        self.assertTrue(len(files_written) >= 1, 'Expected at least one capture file')
+        for fname in files_written:
+            full = os.path.join(self.capture_dir, fname)
+            # The file must exist inside capture_dir (realpath check).
+            real_capture = os.path.realpath(self.capture_dir)
+            real_file = os.path.realpath(full)
+            self.assertTrue(
+                real_file.startswith(real_capture + os.sep),
+                f'Capture file escaped capture_dir: {real_file!r}',
+            )
+        # The filename must NOT contain '/' or '..' after sanitization.
+        for fname in files_written:
+            self.assertNotIn('/', fname, f'Slash in capture filename: {fname!r}')
+            self.assertNotIn('..', fname, f'Dotdot in capture filename: {fname!r}')
+
+    def test_transcript_path_outside_home_is_not_copied(self) -> None:
+        """A transcript_path resolving outside ~ is silently skipped (no copy)."""
+        # Create a real file outside ~ to serve as the adversarial transcript.
+        outside_file = os.path.join(self.capture_dir, 'system_file.txt')
+        with open(outside_file, 'w') as fh:
+            fh.write('sensitive content\n')
+
+        # Simulate a transcript_path that resolves to a path outside ~.
+        # We use /etc/hosts as a known-existent system path; if unavailable we use
+        # the outside_file created in capture_dir (which is under /tmp, outside ~).
+        etc_hosts = '/etc/hosts'
+        adversarial_path = etc_hosts if os.path.isfile(etc_hosts) else outside_file
+
+        payload = {
+            'agent_id': 'sec-test-tp',
+            'agent_type': 'code-writer',
+            'session_id': 'sess-sec2',
+            'transcript_path': adversarial_path,
+            'cwd': self.tmpdir,
+            'stop_hook_active': False,
+            'payload_text': '',
+        }
+        self.hook._capture_if_requested('stop', payload, '')
+
+        # No 'transcript-' file should appear in capture_dir for this agent_id.
+        transcript_files = [
+            f for f in os.listdir(self.capture_dir)
+            if f.startswith('transcript-sec_test_tp') or f.startswith('transcript-sec-test-tp')
+        ]
+        self.assertEqual(
+            transcript_files, [],
+            f'Unexpected transcript copy for out-of-home path: {transcript_files}',
+        )
+
+
 class TestHookTranscriptPreference(unittest.TestCase):
     """on_stop prefers agent_transcript_path over transcript_path for claim extraction."""
 
@@ -588,11 +676,14 @@ class TestHookEnforce(unittest.TestCase):
         aid = 'enforce-retry-1'
         self._start(_make_payload(aid, 's1', self.repo))
         out1, _ = self._stop(self._false_claim_payload(aid, 's1'))
-        out2, _ = self._stop(self._false_claim_payload(aid, 's1'))
+        out2, err2 = self._stop(self._false_claim_payload(aid, 's1'))
         # First stop blocks (JSON), second stop fails open (empty stdout), then cleared.
         self.assertIn('"decision"', out1)
         self.assertEqual(out2.strip(), '')
         self.assertIsNone(self.state.load_snapshot(aid))
+        # Observability: second stop should emit stderr diagnostic explaining why not blocked
+        self.assertIn('detected false DONE but NOT blocking', err2)
+        self.assertIn('ALLOW_RETRY_CAP', err2)
 
     def test_truthful_claim_no_block(self) -> None:
         aid = 'enforce-truth-1'
@@ -717,10 +808,13 @@ class TestHookEnforce(unittest.TestCase):
         self._start(_make_payload(aid, 's1', self.repo))
         payload = self._false_claim_payload(aid, 's1')
         payload['stop_hook_active'] = True
-        stdout, _ = self._stop(payload)
+        stdout, stderr = self._stop(payload)
         self.assertEqual(stdout.strip(), '')
         # Counter must NOT have incremented (no block attempted).
         self.assertEqual(self.state.get_block_count(aid), 0)
+        # Observability: stderr should explain why not blocked despite detecting false DONE
+        self.assertIn('detected false DONE but NOT blocking', stderr)
+        self.assertIn('ALLOW_STOP_HOOK_ACTIVE', stderr)
 
     def test_internal_exception_fails_open(self) -> None:
         """An exception inside the decision path must not leave a block on stdout."""
@@ -746,3 +840,46 @@ class TestHookEnforce(unittest.TestCase):
             self.assertNotIn('"decision"', stdout)
         finally:
             os.environ['ATTEST_ENFORCE'] = '1'  # restored for tearDown symmetry
+
+    def test_done_with_concerns_enforce_no_block(self) -> None:
+        """DONE_WITH_CONCERNS status never blocks, even with claimed-but-absent file.
+
+        Unlike DONE, DONE_WITH_CONCERNS is never a false claim — it's an
+        intentional claim of incomplete work. Enforcement must never block it.
+        """
+        aid = 'enforce-concerns-1'
+        self._start(_make_payload(aid, 's1', self.repo))
+        # Claim a ghost file AND report DONE_WITH_CONCERNS (NOT DONE)
+        payload = _make_payload(
+            aid, 's1', self.repo,
+            payload_text=(
+                '## Handoff\n'
+                'files_changed: src/ghost.py\n'
+                'status: DONE_WITH_CONCERNS\n'
+                'blockers: something not finished\n'
+            )
+        )
+        stdout, _ = self._stop(payload)
+        # DONE_WITH_CONCERNS must never block, even with a phantom file
+        self.assertEqual(stdout.strip(), '')
+
+    def test_counter_persist_fail_open(self) -> None:
+        """If block counter increment fails, fail OPEN (no block emitted).
+
+        This is the primary loop-prevention valve: an unrecorded block is what
+        loops, so a failed counter commit must NOT emit a block.
+        """
+        aid = 'enforce-counter-fail-1'
+        self._start(_make_payload(aid, 's1', self.repo))
+        # Patch increment_block_count to simulate a persistence failure
+        payload = self._false_claim_payload(aid, 's1')
+        so, se = io.StringIO(), io.StringIO()
+        with patch.object(self.state, 'increment_block_count', return_value=None), \
+             patch('sys.stdout', so), patch('sys.stderr', se):
+            self.hook.on_stop(payload)
+        stdout, stderr = so.getvalue(), se.getvalue()
+        # No block JSON on stdout (failing open)
+        self.assertEqual(stdout.strip(), '')
+        # Stderr should explain the failure
+        self.assertIn('counter persist failed', stderr)
+        self.assertIn('failing open', stderr)

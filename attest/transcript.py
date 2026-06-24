@@ -56,9 +56,10 @@ def last_assistant_text(transcript_path: str) -> str:
     except (FileNotFoundError, PermissionError, OSError):
         return ''
 
-    last_text: str = ''
-
-    for raw_line in lines:
+    # Iterate in reverse so the first assistant turn we encounter is the last
+    # one in the file.  We break (via return) as soon as we find a turn that
+    # produces text blocks, avoiding a full forward scan of the whole transcript.
+    for raw_line in reversed(lines):
         raw_line = raw_line.strip()
         if not raw_line:
             continue
@@ -97,7 +98,9 @@ def last_assistant_text(transcript_path: str) -> str:
                     texts.append(text)
 
         if texts:
-            # Update last_text; we keep scanning to find the very last assistant turn
-            last_text = '\n\n'.join(texts)
+            # This is the last assistant turn that produced text — return immediately.
+            return '\n\n'.join(texts)
+        # Assistant turn found but no text blocks (e.g. thinking-only) — keep
+        # scanning backwards to find the last turn that does have text.
 
-    return last_text
+    return ''
