@@ -232,5 +232,50 @@ If you need Attest to catch *more*, the levers are: run from a clean tree, use a
 ceiling is deliberate — Attest would rather miss a questionable case than wrongly
 block honest work.
 
+## 10. Accepted security scope (local-trust model)
+
+Attest is a LOCAL-ONLY developer tool. It runs on the user's own machine as the
+user's own process and has no network surface. The following limitations are
+accepted under that trust model — tightening them would risk false blocks or break
+legitimate override workflows that operators rely on.
+
+### Absolute-path block-suppression (`gitdelta.path_on_disk`)
+
+`path_on_disk` accepts an **absolute path** claim at face value: if an agent claims
+`/etc/passwd` (or any other existing absolute path), `os.path.exists` returns True
+and the file is removed from the blockable set. An agent in a compromised or
+adversarial session could exploit this to suppress a false-DONE block by claiming a
+known-existent system path.
+
+**Why accepted:** Restricting absolute paths would cause false blocks for legitimate
+agents that report absolute cwd-relative paths (which happens regularly). The bias
+toward allowing is by design — a missed detection is safer than a false block.
+Enforcement is advisory and fails open.
+
+### Env-var-driven paths
+
+Several environment variables configure file-system paths that are used without
+bounds-checking:
+
+- `ATTEST_STATE_DB` — path to the SQLite state database.
+- `CAST_DB_PATH` — path to the cast mirror DB.
+- `ATTEST_CAPTURE_DIR` — redirect directory for capture-mode output.
+
+These are trusted as user-controlled configuration under the local trust model; they
+are not validated against an allowlist. A compromised shell environment could redirect
+writes to arbitrary locations, but this requires the attacker to already control the
+user's environment — at which point Attest is not the weakest link.
+
+### Symlink / TOCTOU in `_sha256_file` (residual)
+
+`_sha256_file` uses `os.lstat` to detect symlinks before opening and
+`os.O_NOFOLLOW` for the actual open, which closes the primary TOCTOU window.
+However, a race between the `git status` listing step and the per-file `lstat` +
+open could still be exploited if the working tree is actively being mutated by
+another process during a stop-hook invocation. In practice this race window is
+sub-millisecond and requires the attacker to control the working tree concurrently;
+any `OSError` during open falls back to `_DELETED_SENTINEL` (fail-open). No further
+mitigation is applied — the synchronous hook's latency budget prohibits locking.
+
 See also: [./DESIGN.md](./DESIGN.md) · [./VALIDATION.md](./VALIDATION.md) ·
 [../README.md](../README.md)

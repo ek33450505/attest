@@ -19,19 +19,24 @@ Public API:
 """
 import hashlib
 import os
+import stat
 import subprocess
 from typing import Optional
 
 # Sentinel stored for deleted files in a snapshot.
 _DELETED_SENTINEL = '\x00DELETED\x00'
 
-# Files larger than this are fingerprinted by metadata (size + mtime_ns) rather
-# than content, so the synchronous stop-hook is never stalled by a large binary.
-# A real write changes size or mtime → fingerprint changes → change is still
-# detected.  A sha256 hex digest is always 64 lowercase hex chars with no colon,
-# so the "meta:" prefix guarantees zero collision with a real hash.
+# Files larger than this are fingerprinted by partial content + metadata rather
+# than a full content hash, so the synchronous stop-hook is never stalled by a
+# large binary.  The fingerprint includes a partial hash of the first+last 4 KB
+# so size+mtime-preserving content edits are still detected.
+# A sha256 hex digest is always 64 lowercase hex chars with no colon, so the
+# "meta:" prefix guarantees zero collision with a real hash.
 # Override at runtime via the ATTEST_MAX_HASH_BYTES environment variable.
 _MAX_HASH_BYTES = 10 * 1024 * 1024  # 10 MB default
+
+# Bytes read from the head and tail of large files for the partial content hash.
+_PARTIAL_HASH_CHUNK = 4096
 
 
 class NotAGitRepo(Exception):
@@ -108,21 +113,58 @@ def path_on_disk(root: str, path: str, cwd: str = '') -> bool:
     return False
 
 
+def _partial_content_hash(path: str, size: int) -> str:
+    """Return a 16-char hex digest of the first + last 4 KB of a file.
+
+    Opens the file with O_NOFOLLOW to guard against a TOCTOU race where the
+    file is swapped to a symlink between the caller's lstat and this open.
+    Returns '' on any error so callers can fall back to a plain metadata
+    fingerprint (fail-open by design).
+    """
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    except OSError:
+        return ''
+    try:
+        with os.fdopen(fd, 'rb') as fh:
+            head = fh.read(_PARTIAL_HASH_CHUNK)
+            tail = b''
+            if size > _PARTIAL_HASH_CHUNK:
+                # Seek to the start of the last chunk (but not before the
+                # current position, in case the file shrank since lstat).
+                fh.seek(max(fh.tell(), size - _PARTIAL_HASH_CHUNK))
+                tail = fh.read(_PARTIAL_HASH_CHUNK)
+    except (IOError, OSError):
+        return ''
+    h = hashlib.sha256()
+    h.update(head + tail)
+    return h.hexdigest()[:16]
+
+
 def _sha256_file(path: str) -> str:
-    """Return the SHA-256 hex digest of the file at path.
+    """Return a content fingerprint for the file at path.
 
-    For files whose size exceeds _MAX_HASH_BYTES (default 10 MB, overridable
-    via the ATTEST_MAX_HASH_BYTES env var), a metadata fingerprint is returned
-    instead of reading the file content:
+    For regular files whose size is at or below _MAX_HASH_BYTES (default 10 MB,
+    overridable via the ATTEST_MAX_HASH_BYTES env var), the full SHA-256 hex
+    digest is returned.
 
-        ``meta:<size>:<mtime_ns>``
+    For symlinks, a metadata fingerprint from lstat is returned rather than
+    following the target — this prevents a FIFO/device stall via a symlink TOCTOU:
 
-    Semantic safety: any real write changes at least one of size or mtime, so
-    the fingerprint changes → the change is still detected.  A sha256 hex digest
-    is exactly 64 lowercase hex chars with no colon, so the ``meta:`` prefix
-    guarantees no collision with a real hash and no false OK / false block.
+        ``link:<lstat_size>:<lstat_mtime_ns>``
 
-    Returns _DELETED_SENTINEL if the file cannot be read (deleted, permission
+    For large regular files (size > _MAX_HASH_BYTES), a partial-content
+    fingerprint is returned so the synchronous stop-hook is never stalled:
+
+        ``meta:<size>:<mtime_ns>:<sha256(first4k+last4k)[:16]>``
+
+    A sha256 hex digest is exactly 64 lowercase hex chars with no colon, so the
+    ``meta:`` and ``link:`` prefixes guarantee no collision with a real hash and
+    no false OK / false block.  On any read error when computing the partial hash,
+    the format falls back to ``meta:<size>:<mtime_ns>`` (still detects size/mtime
+    changes).
+
+    Returns _DELETED_SENTINEL if the file cannot be stat'd (deleted, permission
     denied, etc.).
     """
     try:
@@ -133,17 +175,34 @@ def _sha256_file(path: str) -> str:
     # always True, silently degrading every file to metadata fingerprinting.
     if max_bytes < 0:
         max_bytes = _MAX_HASH_BYTES
+
     try:
-        st = os.stat(path)
-        if st.st_size > max_bytes:
-            # Large file: skip content read; fingerprint on size + mtime_ns.
-            return f'meta:{st.st_size}:{st.st_mtime_ns}'
+        lst = os.lstat(path)
     except (IOError, OSError):
         return _DELETED_SENTINEL
 
+    # Symlink: return a lstat-based fingerprint; never follow to the target.
+    # A symlink that points to a FIFO or device could stall a blocking read.
+    if stat.S_ISLNK(lst.st_mode):
+        return f'link:{lst.st_size}:{lst.st_mtime_ns}'
+
+    # Large regular file: partial-content fingerprint (first+last 4 KB).
+    if lst.st_size > max_bytes:
+        partial = _partial_content_hash(path, lst.st_size)
+        if partial:
+            return f'meta:{lst.st_size}:{lst.st_mtime_ns}:{partial}'
+        # Fall back to plain metadata fingerprint on any read error (fail-open).
+        return f'meta:{lst.st_size}:{lst.st_mtime_ns}'
+
+    # Regular file: full SHA-256 with O_NOFOLLOW to prevent a TOCTOU race where
+    # the file is swapped to a symlink between lstat and open.
     h = hashlib.sha256()
     try:
-        with open(path, 'rb') as fh:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    except OSError:
+        return _DELETED_SENTINEL
+    try:
+        with os.fdopen(fd, 'rb') as fh:
             while True:
                 chunk = fh.read(65536)
                 if not chunk:

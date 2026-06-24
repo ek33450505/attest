@@ -246,6 +246,94 @@ class TestHookCaptureMode(unittest.TestCase):
                     pass
 
 
+class TestHookCaptureSecurity(unittest.TestCase):
+    """ATTEST_CAPTURE=1 security: agent_id sanitization + transcript_path bounds check."""
+
+    def setUp(self) -> None:
+        self.capture_dir = tempfile.mkdtemp()
+        self.tmpdir = tempfile.mkdtemp()
+        self.db_path = os.path.join(self.tmpdir, 'state.db')
+        os.environ['ATTEST_STATE_DB'] = self.db_path
+        os.environ['ATTEST_CAPTURE'] = '1'
+        # Redirect all capture output to our isolated temp dir.
+        os.environ['ATTEST_CAPTURE_DIR'] = self.capture_dir
+        from attest import hook
+        self.hook = hook
+
+    def tearDown(self) -> None:
+        import shutil as _shutil
+        os.environ.pop('ATTEST_STATE_DB', None)
+        os.environ.pop('ATTEST_CAPTURE', None)
+        os.environ.pop('ATTEST_CAPTURE_DIR', None)
+        _shutil.rmtree(self.capture_dir, ignore_errors=True)
+        _shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def test_agent_id_with_path_traversal_produces_sanitized_filename(self) -> None:
+        """An agent_id containing '../' is sanitized; the capture file stays inside capture_dir."""
+        payload = {
+            'agent_id': '../../../evil',  # path traversal attempt
+            'agent_type': 'code-writer',
+            'session_id': 'sess-sec1',
+            'transcript_path': '',
+            'cwd': self.tmpdir,
+            'stop_hook_active': False,
+            'payload_text': '',
+        }
+        self.hook._capture_if_requested('stop', payload, '')
+
+        # After sanitization, the agent_id becomes '____evil' (or similar all-safe chars).
+        # All written files must reside directly inside capture_dir.
+        files_written = os.listdir(self.capture_dir)
+        self.assertTrue(len(files_written) >= 1, 'Expected at least one capture file')
+        for fname in files_written:
+            full = os.path.join(self.capture_dir, fname)
+            # The file must exist inside capture_dir (realpath check).
+            real_capture = os.path.realpath(self.capture_dir)
+            real_file = os.path.realpath(full)
+            self.assertTrue(
+                real_file.startswith(real_capture + os.sep),
+                f'Capture file escaped capture_dir: {real_file!r}',
+            )
+        # The filename must NOT contain '/' or '..' after sanitization.
+        for fname in files_written:
+            self.assertNotIn('/', fname, f'Slash in capture filename: {fname!r}')
+            self.assertNotIn('..', fname, f'Dotdot in capture filename: {fname!r}')
+
+    def test_transcript_path_outside_home_is_not_copied(self) -> None:
+        """A transcript_path resolving outside ~ is silently skipped (no copy)."""
+        # Create a real file outside ~ to serve as the adversarial transcript.
+        outside_file = os.path.join(self.capture_dir, 'system_file.txt')
+        with open(outside_file, 'w') as fh:
+            fh.write('sensitive content\n')
+
+        # Simulate a transcript_path that resolves to a path outside ~.
+        # We use /etc/hosts as a known-existent system path; if unavailable we use
+        # the outside_file created in capture_dir (which is under /tmp, outside ~).
+        etc_hosts = '/etc/hosts'
+        adversarial_path = etc_hosts if os.path.isfile(etc_hosts) else outside_file
+
+        payload = {
+            'agent_id': 'sec-test-tp',
+            'agent_type': 'code-writer',
+            'session_id': 'sess-sec2',
+            'transcript_path': adversarial_path,
+            'cwd': self.tmpdir,
+            'stop_hook_active': False,
+            'payload_text': '',
+        }
+        self.hook._capture_if_requested('stop', payload, '')
+
+        # No 'transcript-' file should appear in capture_dir for this agent_id.
+        transcript_files = [
+            f for f in os.listdir(self.capture_dir)
+            if f.startswith('transcript-sec_test_tp') or f.startswith('transcript-sec-test-tp')
+        ]
+        self.assertEqual(
+            transcript_files, [],
+            f'Unexpected transcript copy for out-of-home path: {transcript_files}',
+        )
+
+
 class TestHookTranscriptPreference(unittest.TestCase):
     """on_stop prefers agent_transcript_path over transcript_path for claim extraction."""
 

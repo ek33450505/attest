@@ -24,6 +24,7 @@ Report format:
 """
 import json
 import os
+import re
 import shutil
 import sys
 import time
@@ -94,7 +95,10 @@ def _capture_if_requested(
         return
 
     timestamp = str(int(time.time()))
+    # Truncate then sanitize agent_id: collapse path-special chars so a crafted
+    # agent_id (e.g. '../../etc/passwd') cannot escape the capture directory.
     agent_id = payload_dict.get('agent_id', 'unknown')[:16]
+    agent_id = re.sub(r'[^A-Za-z0-9_-]', '_', agent_id)
 
     # Write normalized payload
     payload_file = os.path.join(captured_dir, f'{event}-{agent_id}-{timestamp}.json')
@@ -113,7 +117,16 @@ def _capture_if_requested(
         except OSError:
             pass
 
-    # Copy transcript if accessible
+    # Copy transcript if accessible and within the user's home tree.
+    # Validate the resolved path before any file operation: an untrusted
+    # transcript_path could point outside ~ (e.g. via '..' components or an
+    # absolute path to a system file). Capture is best-effort/debug — skip
+    # silently rather than risk an arbitrary file copy.
+    _home_root = os.path.realpath(os.path.expanduser('~'))
+    if transcript_path:
+        real_tp = os.path.realpath(transcript_path)
+        if not (real_tp == _home_root or real_tp.startswith(_home_root + os.sep)):
+            transcript_path = ''
     if transcript_path and os.path.isfile(transcript_path):
         ts_dest = os.path.join(captured_dir, f'transcript-{agent_id}-{timestamp}.jsonl')
         try:
