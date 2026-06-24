@@ -65,23 +65,23 @@ fails. The individual targets are also available (`make test-py`, `make test-bat
 
 The raw commands — mirrored exactly by `make test` — are:
 
-Python (282 tests):
+Python (304 tests):
 
 ```sh
 python3 -m unittest discover -s tests -p 'test_*.py'
 ```
 
-Expect `Ran 282 tests ... OK`.
+Expect `Ran 304 tests ... OK`.
 
-BATS (20 tests):
+BATS (21 tests):
 
 ```sh
 bats tests/*.bats
 ```
 
-Expect 20 `ok` lines.
+Expect 21 `ok` lines.
 
-That is **302 tests total** (282 Python unittest + 20 BATS). CI runs both suites
+That is **325 tests total** (304 Python unittest + 21 BATS). CI runs both suites
 on every push and pull request; a PR cannot merge with a red suite.
 
 ## Linting
@@ -163,7 +163,7 @@ When you capture a new real payload that exposes a behavior worth pinning:
 2. **Keep changes scoped.** One logical change per PR. No "while I'm here" edits to
    unrelated files. If you spot something out of scope, surface it in the issue or
    PR description rather than fixing it inline.
-3. **Keep all 302 tests green** and add tests for new behavior — especially any
+3. **Keep all 325 tests green** and add tests for new behavior — especially any
    change to the parser or the enforce/block path. CI must pass before merge.
 4. **Update the `[Unreleased]` section of [`CHANGELOG.md`](CHANGELOG.md)** under the
    appropriate heading (`Added` / `Changed` / `Fixed`).

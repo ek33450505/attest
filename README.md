@@ -27,8 +27,8 @@ behind a confident `Status: DONE`.
 
 Attest was built proof-first and validated against **real Claude Code v2.1.170** — not mocks.
 
-- **302 tests** — 282 Python (`unittest`) + 20 BATS (15 in `tests/hooks.bats`, 5 in
-  `tests/install.bats`). The Python suite runs green (`Ran 282 tests … OK`).
+- **325 tests** — 304 Python (`unittest`) + 21 BATS (16 in `tests/hooks.bats`, 5 in
+  `tests/install.bats`). The Python suite runs green (`Ran 304 tests … OK`).
 - **Real captured payloads ship in the repo.** Four sanitized `SubagentStart`/`SubagentStop`
   fixtures plus a transcript sample live in [`fixtures/`](./fixtures/) and are pinned byte-for-byte
   by `tests/test_real_fixtures.py` — including the load-bearing safety case: an *honest* subagent
