@@ -227,7 +227,7 @@ failure) **allows**. The full allow/block truth table lives in
 6. **Confirm the CLI** is reachable (Homebrew install, or via `bin/attest`):
 
    ```bash
-   attest --version          # -> attest 0.2.0
+   attest --version          # -> attest 0.3.0
    attest snapshot --repo .   # JSON snapshot of the working-tree delta
    ```
 
