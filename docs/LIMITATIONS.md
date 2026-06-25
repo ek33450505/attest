@@ -1,6 +1,6 @@
 # Attest — Limitations
 
-> Version 0.2.0 · validated against Claude Code v2.1.170
+> Version 0.3.0 · validated against Claude Code v2.1.170
 
 Attest verifies one thing, deterministically: **did the files a `DONE` claim says
 changed actually land in the git working tree.** Everything it does *not* do is

@@ -1,6 +1,6 @@
 # Attest — Design & Rationale
 
-> Version 0.2.0. This document explains **why** Attest is built the way it is, for a
+> Version 0.3.0. This document explains **why** Attest is built the way it is, for a
 > contributor or a skeptic reading the source. Every behavioural claim below is grounded
 > in a specific module under [`../attest/`](../attest/). Where a claim is subtle, the
 > relevant function is named so you can check it against the code.

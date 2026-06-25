@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-06-25
+
+### Added
+
+- **Opt-in agent-type allowlist for enforcement** (`ATTEST_ENFORCE_AGENTS`). Set a comma-separated, case-folded list (e.g. `code-writer,bash-specialist`) to restrict which `agent_type`s can be blocked; empty/unset preserves the prior behavior (no agent-type scoping). The scope gate is evaluated right after the master `ATTEST_ENFORCE` switch and can only ever ALLOW — never create a block — so fail-open is preserved. New `enforce.enforce_agents()` reader; `decide()` gains `agent_type`/`enforce_agents` params and the `ALLOW_AGENT_NOT_IN_SCOPE` reason code.
+
 ## [0.2.0] - 2026-06-23
 
 ### Security
