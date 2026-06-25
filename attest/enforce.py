@@ -23,6 +23,7 @@ Public API:
   enforcement_enabled(env) -> bool
   max_retries(env) -> int
   session_ceiling(env) -> int
+  enforce_agents(env) -> frozenset
   decide(**kwargs) -> dict
   build_block_reason(blockable_files, status) -> str
 """
@@ -74,6 +75,22 @@ def session_ceiling(env: Optional[Mapping] = None) -> int:
     return _parse_nonneg_int(env.get('ATTEST_SESSION_BLOCK_CEILING'), _DEFAULT_SESSION_CEILING)
 
 
+def enforce_agents(env: Optional[Mapping] = None) -> frozenset:
+    """Agent-type allowlist for enforcement (ATTEST_ENFORCE_AGENTS, comma-separated).
+
+    Empty / unset -> empty frozenset, meaning NO agent-type scoping: enforcement
+    applies to every agent (the historical behavior, preserved). When non-empty,
+    enforcement is restricted to the listed agent_types; every other agent fails
+    open with ALLOW_AGENT_NOT_IN_SCOPE. Names are case-folded and whitespace-stripped,
+    and blank entries are dropped (so "code-writer, bash-specialist" and trailing commas
+    are handled).
+    """
+    if env is None:
+        env = os.environ
+    raw = env.get('ATTEST_ENFORCE_AGENTS', '')
+    return frozenset(t.strip().lower() for t in raw.split(',') if t.strip())
+
+
 # ---------------------------------------------------------------------------
 # Pure decision
 # ---------------------------------------------------------------------------
@@ -90,6 +107,8 @@ def decide(
     max_retries: int,
     session_blocks: int,
     session_ceiling: int,
+    agent_type: str = '',
+    enforce_agents: frozenset = frozenset(),
 ) -> dict:
     """Pure block/allow decision implementing the Phase-2 truth-table.
 
@@ -105,6 +124,8 @@ def decide(
         max_retries:       per-agent cap.
         session_blocks:    persisted session-scoped block count BEFORE this stop.
         session_ceiling:   session backstop ceiling.
+        agent_type:        the stopping subagent's agent_type (for allowlist scoping).
+        enforce_agents:    allowlist of agent_types eligible for blocking; empty = all.
 
     Returns:
         {
@@ -119,6 +140,8 @@ def decide(
 
     if not enforce:
         return allow('ALLOW_NOT_ENFORCING')
+    if enforce_agents and agent_type not in enforce_agents:
+        return allow('ALLOW_AGENT_NOT_IN_SCOPE')
     if not agent_id_present:
         return allow('ALLOW_NO_AGENT_ID')
     if not false_done:

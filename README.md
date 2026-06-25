@@ -138,6 +138,7 @@ false `DONE`. It blocks **only when every one** of these holds — any doubt ret
 with a `reason_code`:
 
 - enforcement is on (`ATTEST_ENFORCE=1`);
+- the stopping agent's `agent_type` is in `ATTEST_ENFORCE_AGENTS` — when that allowlist is set (empty/unset imposes no agent-type restriction);
 - a unique `agent_id` is present;
 - the claim is a **refined** false `DONE` (status `DONE`, claim present, and a claimed file
   that is absent from the git delta **and** not on disk under any resolution);
@@ -164,6 +165,7 @@ always exits 0; the block travels via pure stdout JSON
 | Env var | Default | Meaning |
 | --- | --- | --- |
 | `ATTEST_ENFORCE` | off | `1` enables blocking; anything else (unset/`0`/`true`/`yes`) is detect-only |
+| `ATTEST_ENFORCE_AGENTS` | (unset) | comma-separated `agent_type` allowlist; empty/unset = all agents eligible. When set (e.g. `code-writer,bash-specialist`), only those agent types are ever blocked — every other agent fails open. |
 | `ATTEST_MAX_RETRIES` | `1` | per-agent blocks before failing open (`0` = on but never blocks — kill switch) |
 | `ATTEST_SESSION_BLOCK_CEILING` | `10` | session-wide block backstop |
 | `ATTEST_STATE_DB` | `~/.attest/state.db` | snapshot + counter store |
