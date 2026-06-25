@@ -344,6 +344,8 @@ def on_stop(payload_dict: dict, *, raw: Optional[str] = None) -> None:
         max_retries=enforce_mod.max_retries(),
         session_blocks=state_mod.get_session_blocks(session_id, root) if enforce else 0,
         session_ceiling=enforce_mod.session_ceiling(),
+        agent_type=(payload_dict.get('agent_type') or '').strip().lower(),
+        enforce_agents=enforce_mod.enforce_agents(),
     )
 
     blocked = False

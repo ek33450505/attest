@@ -24,6 +24,8 @@ def _block_eligible(**overrides) -> dict:
         max_retries=1,
         session_blocks=0,
         session_ceiling=10,
+        agent_type='code-writer',
+        enforce_agents=frozenset(),
     )
     kwargs.update(overrides)
     return kwargs
@@ -91,6 +93,40 @@ class TestDecideTruthTable(unittest.TestCase):
         self.assertEqual(enforce.decide(**_block_eligible(block_count=2, max_retries=2))['action'], 'allow')
 
 
+class TestDecideAgentScope(unittest.TestCase):
+    def test_empty_allowlist_does_not_scope(self) -> None:
+        # Backward compat: empty allowlist => every agent eligible => blocks.
+        d = enforce.decide(**_block_eligible(agent_type='anything', enforce_agents=frozenset()))
+        self.assertEqual(d['action'], 'block')
+
+    def test_in_scope_agent_blocks(self) -> None:
+        d = enforce.decide(**_block_eligible(
+            agent_type='code-writer', enforce_agents=frozenset({'code-writer', 'bash-specialist'})))
+        self.assertEqual(d['action'], 'block')
+        self.assertEqual(d['reason_code'], 'BLOCK_FALSE_DONE')
+
+    def test_out_of_scope_agent_allows(self) -> None:
+        d = enforce.decide(**_block_eligible(
+            agent_type='code-reviewer', enforce_agents=frozenset({'code-writer', 'bash-specialist'})))
+        self.assertEqual(d['action'], 'allow')
+        self.assertFalse(d['increment'])
+        self.assertFalse(d['keep_state'])
+        self.assertEqual(d['reason_code'], 'ALLOW_AGENT_NOT_IN_SCOPE')
+
+    def test_scope_short_circuits_before_other_gates(self) -> None:
+        # Out-of-scope wins even when every block precondition holds.
+        d = enforce.decide(**_block_eligible(
+            agent_type='docs', enforce_agents=frozenset({'code-writer'}),
+            false_done=True, reliable=True, ambiguous=False))
+        self.assertEqual(d['reason_code'], 'ALLOW_AGENT_NOT_IN_SCOPE')
+
+    def test_empty_agent_type_with_allowlist_allows(self) -> None:
+        # A missing agent_type is never in a non-empty allowlist => fail open.
+        d = enforce.decide(**_block_eligible(
+            agent_type='', enforce_agents=frozenset({'code-writer'})))
+        self.assertEqual(d['reason_code'], 'ALLOW_AGENT_NOT_IN_SCOPE')
+
+
 class TestConfigReaders(unittest.TestCase):
     def test_enforcement_enabled_strict(self) -> None:
         self.assertTrue(enforce.enforcement_enabled({'ATTEST_ENFORCE': '1'}))
@@ -111,6 +147,21 @@ class TestConfigReaders(unittest.TestCase):
         self.assertEqual(enforce.session_ceiling({}), 10)
         self.assertEqual(enforce.session_ceiling({'ATTEST_SESSION_BLOCK_CEILING': '25'}), 25)
         self.assertEqual(enforce.session_ceiling({'ATTEST_SESSION_BLOCK_CEILING': 'x'}), 10)
+
+    def test_enforce_agents_parsing(self) -> None:
+        self.assertEqual(enforce.enforce_agents({}), frozenset())                       # unset -> no scoping
+        self.assertEqual(enforce.enforce_agents({'ATTEST_ENFORCE_AGENTS': ''}), frozenset())
+        self.assertEqual(
+            enforce.enforce_agents({'ATTEST_ENFORCE_AGENTS': 'code-writer, bash-specialist'}),
+            frozenset({'code-writer', 'bash-specialist'}))
+        # whitespace + trailing/empty entries dropped
+        self.assertEqual(
+            enforce.enforce_agents({'ATTEST_ENFORCE_AGENTS': ' code-writer ,, '}),
+            frozenset({'code-writer'}))
+        # case-folded: mixed-case env entries match the lowercase-hyphen convention
+        self.assertEqual(
+            enforce.enforce_agents({'ATTEST_ENFORCE_AGENTS': 'Code-Writer, BASH-Specialist'}),
+            frozenset({'code-writer', 'bash-specialist'}))
 
 
 class TestBuildBlockReason(unittest.TestCase):
